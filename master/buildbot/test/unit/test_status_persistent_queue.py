@@ -12,14 +12,19 @@
 # Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
 # Copyright Buildbot Team Members
-
+from future.utils import iteritems
 
 import os
-from twisted.trial import unittest
-from buildbot.test.util import dirs
 
-from buildbot.status.persistent_queue import MemoryQueue, DiskQueue, \
-    IQueue, PersistentQueue, WriteFile
+from buildbot.test.util import dirs
+from twisted.trial import unittest
+
+from buildbot.status.persistent_queue import DiskQueue
+from buildbot.status.persistent_queue import IQueue
+from buildbot.status.persistent_queue import MemoryQueue
+from buildbot.status.persistent_queue import PersistentQueue
+from buildbot.status.persistent_queue import WriteFile
+
 
 class test_Queues(dirs.DirsMixin, unittest.TestCase):
 
@@ -36,8 +41,8 @@ class test_Queues(dirs.DirsMixin, unittest.TestCase):
         WriteFile(os.path.join('fake_dir', '5'), 'foo5')
         WriteFile(os.path.join('fake_dir', '8'), 'foo8')
         queue = PersistentQueue(MemoryQueue(3),
-            DiskQueue('fake_dir', 5, pickleFn=str, unpickleFn=str))
-        self.assertEqual(['foo3', 'foo5', 'foo8'], queue.items())
+                                DiskQueue('fake_dir', 5, pickleFn=str, unpickleFn=str))
+        self.assertEqual(['foo3', 'foo5', 'foo8'], list(iteritems(queue)))
         self.assertEqual(3, queue.nbItems())
         self.assertEqual(['foo3', 'foo5', 'foo8'], queue.popChunk())
 
@@ -45,7 +50,7 @@ class test_Queues(dirs.DirsMixin, unittest.TestCase):
         self.assertTrue(IQueue.providedBy(q))
         self.assertEqual(8, q.maxItems())
         self.assertEqual(0, q.nbItems())
-        self.assertEqual([], q.items())
+        self.assertEqual([], list(iteritems(q)))
 
         for i in range(4):
             self.assertEqual(None, q.pushItem(i), str(i))
@@ -53,86 +58,86 @@ class test_Queues(dirs.DirsMixin, unittest.TestCase):
         self.assertEqual([0, 1, 2, 3], q.items())
         self.assertEqual(4, q.nbItems())
         if isinstance(q, PersistentQueue):
-            self.assertEqual([0, 1, 2], q.primaryQueue.items())
-            self.assertEqual([3], q.secondaryQueue.items())
+            self.assertEqual([0, 1, 2], list(iteritems(q.primaryQueue)))
+            self.assertEqual([3], list(iteritems(q.secondaryQueue)))
 
         self.assertEqual(None, q.save())
-        self.assertEqual([0, 1, 2, 3], q.items())
+        self.assertEqual([0, 1, 2, 3], list(iteritems(q)))
         self.assertEqual(4, q.nbItems())
         if isinstance(q, PersistentQueue):
-            self.assertEqual([], q.primaryQueue.items())
-            self.assertEqual([0, 1, 2, 3], q.secondaryQueue.items())
+            self.assertEqual([], list(iteritems(q.primaryQueue)))
+            self.assertEqual([0, 1, 2, 3], list(iteritems(q.secondaryQueue)))
 
         for i in range(4):
             self.assertEqual(None, q.pushItem(i + 4), str(i + 4))
             self.assertEqual(i + 5, q.nbItems(), str(i + 4))
-        self.assertEqual([0, 1, 2, 3, 4, 5, 6, 7], q.items())
+        self.assertEqual([0, 1, 2, 3, 4, 5, 6, 7], list(iteritems(q)))
         self.assertEqual(8, q.nbItems())
         if isinstance(q, PersistentQueue):
-            self.assertEqual([0, 1, 2], q.primaryQueue.items())
-            self.assertEqual([3, 4, 5, 6, 7], q.secondaryQueue.items())
+            self.assertEqual([0, 1, 2], list(iteritems(q.primaryQueue)))
+            self.assertEqual([3, 4, 5, 6, 7], list(iteritems(q.secondaryQueue)))
 
         self.assertEqual(0, q.pushItem(8))
         self.assertEqual(8, q.nbItems())
-        self.assertEqual([1, 2, 3, 4, 5, 6, 7, 8], q.items())
+        self.assertEqual([1, 2, 3, 4, 5, 6, 7, 8], list(iteritems(q)))
         if isinstance(q, PersistentQueue):
-            self.assertEqual([1, 2, 3], q.primaryQueue.items())
-            self.assertEqual([4, 5, 6, 7, 8], q.secondaryQueue.items())
+            self.assertEqual([1, 2, 3], list(iteritems(q.primaryQueue)))
+            self.assertEqual([4, 5, 6, 7, 8], list(iteritems(q.secondaryQueue)))
 
         self.assertEqual([1, 2], q.popChunk(2))
-        self.assertEqual([3, 4, 5, 6, 7, 8], q.items())
+        self.assertEqual([3, 4, 5, 6, 7, 8], list(iteritems(q)))
         self.assertEqual(6, q.nbItems())
         if isinstance(q, PersistentQueue):
-            self.assertEqual([3], q.primaryQueue.items())
-            self.assertEqual([4, 5, 6, 7, 8], q.secondaryQueue.items())
+            self.assertEqual([3], list(iteritems(q.primaryQueue)))
+            self.assertEqual([4, 5, 6, 7, 8], list(iteritems(q.secondaryQueue)))
 
         self.assertEqual([3], q.popChunk(1))
-        self.assertEqual([4, 5, 6, 7, 8], q.items())
+        self.assertEqual([4, 5, 6, 7, 8], list(iteritems(q)))
         self.assertEqual(5, q.nbItems())
         if isinstance(q, PersistentQueue):
-            self.assertEqual([], q.primaryQueue.items())
-            self.assertEqual([4, 5, 6, 7, 8], q.secondaryQueue.items())
+            self.assertEqual([], list(iteritems(q.primaryQueue)))
+            self.assertEqual([4, 5, 6, 7, 8], list(iteritems(q.secondaryQueue)))
 
         self.assertEqual(None, q.save())
         self.assertEqual(5, q.nbItems())
-        self.assertEqual([4, 5, 6, 7, 8], q.items())
+        self.assertEqual([4, 5, 6, 7, 8], list(iteritems(q)))
         if isinstance(q, PersistentQueue):
-            self.assertEqual([], q.primaryQueue.items())
-            self.assertEqual([4, 5, 6, 7, 8], q.secondaryQueue.items())
+            self.assertEqual([], list(iteritems(q.primaryQueue)))
+            self.assertEqual([4, 5, 6, 7, 8], list(iteritems(q.secondaryQueue)))
 
         self.assertEqual(None, q.insertBackChunk([2, 3]))
-        self.assertEqual([2, 3, 4, 5, 6, 7, 8], q.items())
+        self.assertEqual([2, 3, 4, 5, 6, 7, 8], list(iteritems(q)))
         self.assertEqual(7, q.nbItems())
         if isinstance(q, PersistentQueue):
-            self.assertEqual([2, 3], q.primaryQueue.items())
-            self.assertEqual([4, 5, 6, 7, 8], q.secondaryQueue.items())
+            self.assertEqual([2, 3], list(iteritems(q.primaryQueue)))
+            self.assertEqual([4, 5, 6, 7, 8], list(iteritems(q.secondaryQueue)))
 
         self.assertEqual([0], q.insertBackChunk([0, 1]))
-        self.assertEqual([1, 2, 3, 4, 5, 6, 7, 8], q.items())
+        self.assertEqual([1, 2, 3, 4, 5, 6, 7, 8], list(iteritems(q)))
         self.assertEqual(8, q.nbItems())
         if isinstance(q, PersistentQueue):
-            self.assertEqual([1, 2, 3], q.primaryQueue.items())
-            self.assertEqual([4, 5, 6, 7, 8], q.secondaryQueue.items())
+            self.assertEqual([1, 2, 3], list(iteritems(q.primaryQueue)))
+            self.assertEqual([4, 5, 6, 7, 8], list(iteritems(q.secondaryQueue)))
 
         self.assertEqual([10, 11], q.insertBackChunk([10, 11]))
-        self.assertEqual([1, 2, 3, 4, 5, 6, 7, 8], q.items())
+        self.assertEqual([1, 2, 3, 4, 5, 6, 7, 8], list(iteritems(q)))
         self.assertEqual(8, q.nbItems())
         if isinstance(q, PersistentQueue):
-            self.assertEqual([1, 2, 3], q.primaryQueue.items())
-            self.assertEqual([4, 5, 6, 7, 8], q.secondaryQueue.items())
+            self.assertEqual([1, 2, 3], list(iteritems(q.primaryQueue)))
+            self.assertEqual([4, 5, 6, 7, 8], list(iteritems(q.secondaryQueue)))
 
         self.assertEqual([1, 2, 3, 4, 5, 6, 7, 8], q.popChunk(8))
-        self.assertEqual([], q.items())
+        self.assertEqual([], list(iteritems(q)))
         self.assertEqual(0, q.nbItems())
         if isinstance(q, PersistentQueue):
-            self.assertEqual([], q.primaryQueue.items())
-            self.assertEqual([], q.secondaryQueue.items())
+            self.assertEqual([], list(iteritems(q.primaryQueue)))
+            self.assertEqual([], list(iteritems(q.secondaryQueue)))
 
         self.assertEqual([], q.popChunk())
         self.assertEqual(0, q.nbItems())
         if isinstance(q, PersistentQueue):
-            self.assertEqual([], q.primaryQueue.items())
-            self.assertEqual([], q.secondaryQueue.items())
+            self.assertEqual([], list(iteritems(q.primaryQueue)))
+            self.assertEqual([], list(iteritems(q.secondaryQueue)))
 
     def testMemoryQueue(self):
         self._test_helper(MemoryQueue(maxItems=8))

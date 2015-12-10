@@ -2,7 +2,8 @@
 *.pyc
 *.pyo
 *$py.class
-*.swp
+# vim trash:
+.*.sw[a-z]
 *.patch
 *.orig
 *.rej
@@ -11,22 +12,18 @@
 MANIFEST
 _trial_temp*
 dist
-build
+build/
 .build
 *.egg-info
 master/docs/buildbot.html
 master/docs/buildbot.info
 master/docs/buildbot.info-1
 master/docs/buildbot.info-2
-master/docs/images/master.png
-master/docs/images/overview.png
-master/docs/images/slavebuilder.png
-master/docs/images/slaves.png
-master/docs/images/status.png
 .stgit-edit.txt
 .project
 .pydevproject
 .settings
+*/build/
 master/docs/buildbot
 master/docs/version.texinfo
 master/docs/docs.tgz
@@ -39,3 +36,8 @@ apidocs/reference.tgz
 common/googlecode_upload.py
 master/docs/tutorial/_build
 _build
+.tox
+master/setuptools_trial*
+master/buildbot/www/static/js/default/
+sandbox
+.idea/

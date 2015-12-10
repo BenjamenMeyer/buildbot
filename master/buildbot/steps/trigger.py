@@ -12,144 +12,250 @@
 # Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
 # Copyright Buildbot Team Members
+from future.utils import iteritems
+from future.utils import itervalues
 
-from buildbot.process.buildstep import LoggingBuildStep, SUCCESS, FAILURE, EXCEPTION
+from buildbot import config
+from buildbot.interfaces import ITriggerableScheduler
+from buildbot.process.buildstep import BuildStep
+from buildbot.process.buildstep import CANCELLED
+from buildbot.process.buildstep import EXCEPTION
+from buildbot.process.buildstep import SUCCESS
 from buildbot.process.properties import Properties
-from buildbot.schedulers.triggerable import Triggerable
-from twisted.python import log
+from buildbot.process.properties import Property
+from buildbot.process.results import statusToString
+from buildbot.process.results import worst_status
 from twisted.internet import defer
+from twisted.python import log
 
-class Trigger(LoggingBuildStep):
+
+class Trigger(BuildStep):
     name = "trigger"
 
-    renderables = [ 'set_properties', 'schedulerNames', 'sourceStamp',
-                    'updateSourceStamp', 'alwaysUseLatest' ]
+    renderables = [
+        'alwaysUseLatest',
+        'parent_relationship',
+        'schedulerNames',
+        'set_properties',
+        'sourceStamps',
+        'updateSourceStamp'
+    ]
 
     flunkOnFailure = True
 
-    def __init__(self, schedulerNames=[], sourceStamp=None, updateSourceStamp=None, alwaysUseLatest=False,
-                 waitForFinish=False, set_properties={}, copy_properties=[], **kwargs):
+    def __init__(self, schedulerNames=None, sourceStamp=None, sourceStamps=None,
+                 updateSourceStamp=None, alwaysUseLatest=False,
+                 waitForFinish=False, set_properties=None,
+                 copy_properties=None, parent_relationship="Triggered from", **kwargs):
+        if schedulerNames is None:
+            schedulerNames = []
         if not schedulerNames:
-            raise ValueError("You must specify a scheduler to trigger")
-        if sourceStamp and (updateSourceStamp is not None):
-            raise ValueError("You can't specify both sourceStamp and updateSourceStamp")
-        if sourceStamp and alwaysUseLatest:
-            raise ValueError("You can't specify both sourceStamp and alwaysUseLatest")
+            config.error(
+                "You must specify a scheduler to trigger")
+        if (sourceStamp or sourceStamps) and (updateSourceStamp is not None):
+            config.error(
+                "You can't specify both sourceStamps and updateSourceStamp")
+        if (sourceStamp or sourceStamps) and alwaysUseLatest:
+            config.error(
+                "You can't specify both sourceStamps and alwaysUseLatest")
         if alwaysUseLatest and (updateSourceStamp is not None):
-            raise ValueError("You can't specify both alwaysUseLatest and updateSourceStamp")
+            config.error(
+                "You can't specify both alwaysUseLatest and updateSourceStamp"
+            )
         self.schedulerNames = schedulerNames
-        self.sourceStamp = sourceStamp
+        self.sourceStamps = sourceStamps or []
+        if sourceStamp:
+            self.sourceStamps.append(sourceStamp)
         if updateSourceStamp is not None:
             self.updateSourceStamp = updateSourceStamp
         else:
-            self.updateSourceStamp = not (alwaysUseLatest or sourceStamp)
+            self.updateSourceStamp = not (alwaysUseLatest or self.sourceStamps)
         self.alwaysUseLatest = alwaysUseLatest
         self.waitForFinish = waitForFinish
-        self.set_properties = set_properties
-        self.copy_properties = copy_properties
+
+        if set_properties is None:
+            set_properties = {}
+        if copy_properties is None:
+            copy_properties = []
+
+        properties = {}
+        properties.update(set_properties)
+        for i in copy_properties:
+            properties[i] = Property(i)
+        self.set_properties = properties
+        self.parent_relationship = parent_relationship
         self.running = False
         self.ended = False
-        LoggingBuildStep.__init__(self, **kwargs)
-        self.addFactoryArguments(schedulerNames=schedulerNames,
-                                 sourceStamp=sourceStamp,
-                                 updateSourceStamp=updateSourceStamp,
-                                 alwaysUseLatest=alwaysUseLatest,
-                                 waitForFinish=waitForFinish,
-                                 set_properties=set_properties,
-                                 copy_properties=copy_properties)
+        self.brids = []
+        self.triggeredNames = None
+        BuildStep.__init__(self, **kwargs)
 
     def interrupt(self, reason):
+        # We cancel the buildrequests, as the data api handles
+        # both cases:
+        # - build started: stop is sent,
+        # - build not created yet: related buildrequests are set to CANCELLED.
+        # Note that there is an identified race condition though (more details
+        # are available at buildbot.data.buildrequests).
+        for brid in self.brids:
+            self.master.data.control("cancel",
+                                     {'reason': 'parent build was interrupted'},
+                                     ("buildrequests", brid))
         if self.running and not self.ended:
-            self.step_status.setText(["interrupted"])
-            return self.end(EXCEPTION)
-
-    def end(self, result):
-        if not self.ended:
             self.ended = True
-            return self.finished(result)
 
-    def start(self):
-        properties = self.build.getProperties()
-
-        # make a new properties object from a dict rendered by the old 
+    # Create the properties that are used for the trigger
+    def createTriggerProperties(self, properties):
+        # make a new properties object from a dict rendered by the old
         # properties object
-        props_to_set = Properties()
-        props_to_set.update(self.set_properties, "Trigger")
-        for p in self.copy_properties:
-            if p not in properties:
-                continue
-            props_to_set.setProperty(p, properties[p],
-                        "%s (in triggering build)" % properties.getPropertySource(p))
+        trigger_properties = Properties()
+        trigger_properties.update(properties, "Trigger")
+        return trigger_properties
 
+    def getSchedulerByName(self, name):
+        # we use the fact that scheduler_manager is a multiservice, with schedulers as childs
+        # this allow to quickly find schedulers instance by name
+        schedulers = self.master.scheduler_manager.namedServices
+        if name not in schedulers:
+            raise ValueError("unknown triggered scheduler: %r" % (name,))
+        sch = schedulers[name]
+        if not ITriggerableScheduler.providedBy(sch):
+            raise ValueError("triggered scheduler is not ITriggerableScheduler: %r" % (name,))
+        return sch
+
+    # This customization enpoint allows users to dynamically select which scheduler and properties to trigger
+    def getSchedulersAndProperties(self):
+        return [(sched, self.set_properties) for sched in self.schedulerNames]
+
+    def prepareSourcestampListForTrigger(self):
+        if self.sourceStamps:
+            ss_for_trigger = {}
+            for ss in self.sourceStamps:
+                codebase = ss.get('codebase', '')
+                assert codebase not in ss_for_trigger, "codebase specified multiple times"
+                ss_for_trigger[codebase] = ss
+            return list(itervalues(ss_for_trigger))
+
+        if self.alwaysUseLatest:
+            return []
+
+        # start with the sourcestamps from current build
+        ss_for_trigger = {}
+        objs_from_build = self.build.getAllSourceStamps()
+        for ss in objs_from_build:
+            ss_for_trigger[ss.codebase] = ss.asDict()
+
+        # overrule revision in sourcestamps with got revision
+        if self.updateSourceStamp:
+            got = self.getAllGotRevisions()
+            for codebase in ss_for_trigger:
+                if codebase in got:
+                    ss_for_trigger[codebase]['revision'] = got[codebase]
+
+        return list(itervalues(ss_for_trigger))
+
+    def getAllGotRevisions(self):
+        all_got_revisions = self.getProperty('got_revision', {})
+        # For backwards compatibility all_got_revisions is a string if codebases
+        # are not used. Convert to the default internal type (dict)
+        if not isinstance(all_got_revisions, dict):
+            all_got_revisions = {'': all_got_revisions}
+        return all_got_revisions
+
+    @defer.inlineCallbacks
+    def worstStatus(self, overall_results, rclist):
+        for was_cb, results in rclist:
+            if isinstance(results, tuple):
+                results, _ = results
+
+            if not was_cb:
+                yield self.addLogWithFailure(results)
+                results = EXCEPTION
+            overall_results = worst_status(overall_results, results)
+        defer.returnValue(overall_results)
+
+    @defer.inlineCallbacks
+    def addBuildUrls(self, rclist):
+        brids = {}
+        for was_cb, results in rclist:
+            if isinstance(results, tuple):
+                results, brids = results
+
+            if was_cb:  # errors were already logged in worstStatus
+                for builderid, br in iteritems(brids):
+                    builderDict = yield self.master.data.get(("builders", builderid))
+                    builds = yield self.master.db.builds.getBuilds(buildrequestid=br)
+                    for build in builds:
+                        num = build['number']
+                        url = self.master.status.getURLForBuild(builderid, num)
+                        yield self.addURL("%s: %s #%d" % (statusToString(results),
+                                                          builderDict["name"], num), url)
+
+    @defer.inlineCallbacks
+    def run(self):
+        schedulers_and_props = yield self.getSchedulersAndProperties()
+
+        # post process the schedulernames, and raw properties
+        # we do this out of the loop, as this can result in errors
+        schedulers_and_props = [(
+            self.getSchedulerByName(sch),
+            self.createTriggerProperties(props_to_set))
+            for sch, props_to_set in schedulers_and_props]
+
+        ss_for_trigger = self.prepareSourcestampListForTrigger()
+
+        dl = []
+        triggeredNames = []
+        results = SUCCESS
         self.running = True
 
-        # (is there an easier way to find the BuildMaster?)
-        all_schedulers = self.build.builder.botmaster.parent.allSchedulers()
-        all_schedulers = dict([(sch.name, sch) for sch in all_schedulers])
-        unknown_schedulers = []
-        triggered_schedulers = []
+        for sch, props_to_set in schedulers_and_props:
+            idsDeferred, resultsDeferred = sch.trigger(
+                waited_for=self.waitForFinish, sourcestamps=ss_for_trigger,
+                set_props=props_to_set,
+                parent_buildid=self.build.buildid,
+                parent_relationship=self.parent_relationship
+            )
+            # we are not in a hurry of starting all in parallel and managing
+            # the deferred lists, just let the db writes be serial.
+            try:
+                bsid, brids = yield idsDeferred
+            except Exception as e:
+                yield self.addLogWithException(e)
+                results = EXCEPTION
 
-        # don't fire any schedulers if we discover an unknown one
-        for scheduler in self.schedulerNames:
-            scheduler = scheduler
-            if all_schedulers.has_key(scheduler):
-                sch = all_schedulers[scheduler]
-                if isinstance(sch, Triggerable):
-                    triggered_schedulers.append(scheduler)
-                else:
-                    unknown_schedulers.append(scheduler)
-            else:
-                unknown_schedulers.append(scheduler)
-
-        if unknown_schedulers:
-            self.step_status.setText(['no scheduler:'] + unknown_schedulers)
-            return self.end(FAILURE)
-
-        master = self.build.builder.botmaster.parent # seriously?!
-        if self.sourceStamp:
-            d = master.db.sourcestamps.addSourceStamp(**self.sourceStamp)
-        elif self.alwaysUseLatest:
-            d = defer.succeed(None)
-        else:
-            ss = self.build.getSourceStamp()
-            if self.updateSourceStamp:
-                got = properties.getProperty('got_revision')
-                if got:
-                    ss = ss.getAbsoluteSourceStamp(got)
-            d = ss.getSourceStampId(master)
-        def start_builds(ssid):
-            dl = []
-            for scheduler in triggered_schedulers:
-                sch = all_schedulers[scheduler]
-                dl.append(sch.trigger(ssid, set_props=props_to_set))
-            self.step_status.setText(['triggered'] + triggered_schedulers)
-
-            if self.waitForFinish:
-                return defer.DeferredList(dl, consumeErrors=1)
-            else:
-                # do something to handle errors
-                for d in dl:
-                    d.addErrback(log.err,
-                        '(ignored) while invoking Triggerable schedulers:')
-                self.end(SUCCESS)
-                return None
-        d.addCallback(start_builds)
-
-        def cb(rclist):
-            result = SUCCESS
-            for was_cb, results in rclist:
-                # TODO: make this algo more configurable
-                if not was_cb:
-                    result = EXCEPTION
-                    log.err(results)
-                    break
-                if results == FAILURE:
-                    result = FAILURE
-            return self.end(result)
-        def eb(why):
-            return self.end(FAILURE)
+            self.brids.extend(itervalues(brids))
+            for brid in brids.values():
+                # put the url to the brids, so that we can have the status from the beginning
+                url = self.master.status.getURLForBuildrequest(brid)
+                yield self.addURL("%s #%d" % (sch.name, brid), url)
+            dl.append(resultsDeferred)
+            triggeredNames.append(sch.name)
+            if self.ended:
+                defer.returnValue(CANCELLED)
+        self.triggeredNames = triggeredNames
 
         if self.waitForFinish:
-            d.addCallbacks(cb, eb)
+            rclist = yield defer.DeferredList(dl, consumeErrors=1)
+            # we were interrupted, don't bother update status
+            if self.ended:
+                defer.returnValue(CANCELLED)
+            yield self.addBuildUrls(rclist)
+            results = yield self.worstStatus(results, rclist)
+        else:
+            # do something to handle errors
+            for d in dl:
+                d.addErrback(log.err,
+                             '(ignored) while invoking Triggerable schedulers:')
 
-        d.addErrback(log.err, '(ignored) while triggering builds:')
+        defer.returnValue(results)
+
+    def getResultSummary(self):
+        if self.ended:
+            return {u'step': u'interrupted'}
+        return {u'step': self.getCurrentSummary()[u'step']} if self.triggeredNames else {}
+
+    def getCurrentSummary(self):
+        if not self.triggeredNames:
+            return {u'step': u'running'}
+        return {u'step': u'triggered %s' % (u', '.join(self.triggeredNames))}

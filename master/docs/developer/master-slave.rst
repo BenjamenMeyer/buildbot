@@ -58,9 +58,11 @@ The slave-side Bot object has the following remote methods:
     ``environ``
         copy of the slaves environment
     ``system``
-        OS the slave is running (extracted from pythons os.name)
+        OS the slave is running (extracted from Python's os.name)
     ``basedir``
         base directory where slave is running
+    ``numcpus``
+        number of CPUs on the slave, either as configured or as detected (since buildbot-slave version 0.9.0)
 
 :meth:`~buildslave.bot.Bot.remote_getVersion`
     Returns the slave's version
@@ -145,7 +147,7 @@ Commands
 --------
 
 Actual work done by the slave is represented on the master side by a
-:class:`buildbot.process.buildstep.RemoteCommand` instance.
+:class:`buildbot.process.remotecommand.RemoteCommand` instance.
 
 The command instance keeps a reference to the slave-side
 :class:`buildslave.bot.SlaveBuilder`, and calls methods like
@@ -156,10 +158,10 @@ keeps a reference to the command, and calls the following methods on it:
 Master-Side RemoteCommand Methods
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-:meth:`~buildbot.process.buildstep.RemoteCommand.remote_update`
+:meth:`~buildbot.process.remotecommand.RemoteCommand.remote_update`
     Update information about the running command.  See below for the format.
 
-:meth:`~buildbot.process.buildstep.RemoteCommand.remote_complete`
+:meth:`~buildbot.process.remotecommand.RemoteCommand.remote_complete`
     Signal that the command is complete, either successfully or with a Twisted failure.
 
 .. _master-slave-updates:
@@ -168,17 +170,17 @@ Updates
 -------
 
 Updates from the slave, sent via
-:meth:`~buildbot.process.buildstep.RemoteCommand.remote_update`, are a list of
+:meth:`~buildbot.process.remotecommand.RemoteCommand.remote_update`, are a list of
 individual update elements.  Each update element is, in turn, a list of the
 form ``[data, 0]`` where the 0 is present for historical reasons.  The data is
 a dictionary, with keys describing the contents.  The updates are handled by
-:meth:`~buildbot.process.buildstep.RemoteCommand.remoteUpdate`.
+:meth:`~buildbot.process.remotecommand.RemoteCommand.remote_update`.
 
 Updates with different keys can be combined into a single dictionary or
 delivered sequentially as list elements, at the slave's option.
 
 To summarize, an ``updates`` parameter to
-:meth:`~buildbot.process.buildstep.RemoteCommand.remote_update` might look like
+:meth:`~buildbot.process.remotecommand.RemoteCommand.remote_update` might look like
 this::
 
     [
@@ -215,7 +217,7 @@ Runs a shell command on the slave.  This command takes the following arguments:
     A dictionary of environment variables to augment or replace the
     existing environment on the slave.  In this dictionary, ``PYTHONPATH``
     is treated specially: it should be a list of path components, rather
-    than a string, and will be prepended to the existing python path.
+    than a string, and will be prepended to the existing Python path.
 
 ``initial_stdin``
 
@@ -379,7 +381,7 @@ following arguments:
 
 ``mode``
 
-    Acess mode for the new file.
+    Access mode for the new file.
 
 The reader object's ``read(maxsize)`` method will be called with a maximum
 size, which will return no more than that number of bytes as a bytestring.  At
@@ -393,7 +395,7 @@ mkdir
 .....
 
 This command will create a directory on the slave.  It will also create any
-intervening directories required.  It takes the following arugment:
+intervening directories required.  It takes the following argument:
 
 ``dir``
 
@@ -454,6 +456,39 @@ It produces two status updates:
 ``rc``
 
     0 if the file is found, otherwise 1.
+
+glob
+....
+
+This command finds all pathnames matching a specified pattern that uses shell-style wildcards.
+It takes a single parameter, ``path``, specifying the pattern to pass to Python's
+``glob.glob`` function.
+
+It produces two status updates:
+
+``files``
+
+    The list of matching files returned from ``glob.glob``
+
+``rc``
+
+    0 if the ``glob.glob`` does not raise exception, otherwise 1.
+
+listdir
+.......
+
+This command reads the directory and returns the list with directory contents. It
+takes a single parameter, ``dir``, specifying the directory relative to builder's basedir.
+
+It produces two status updates:
+
+``files``
+
+    The list of files in the directory returned from ``os.listdir``
+
+``rc``
+
+    0 if the ``os.listdir`` does not raise exception, otherwise 1.
 
 Source Commands
 ...............

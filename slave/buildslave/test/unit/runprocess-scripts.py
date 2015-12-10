@@ -18,13 +18,14 @@
 # have access to any of the Buildbot source.  Functions here should be kept
 # very simple!
 
-import sys
 import os
-import time
 import select
 import signal
+import sys
+import time
 
 # utils
+
 
 def write_pidfile(pidfile):
     pidfile_tmp = pidfile + "~"
@@ -33,35 +34,41 @@ def write_pidfile(pidfile):
     f.close()
     os.rename(pidfile_tmp, pidfile)
 
+
 def sleep_forever():
-    signal.alarm(110) # die after 110 seconds
+    signal.alarm(110)  # die after 110 seconds
     while True:
         time.sleep(10)
 
-def wait_for_parent_death():
+
+def wait_for_parent_death(orig_parent_pid):
     while True:
         ppid = os.getppid()
-        if ppid == 1:
+        if ppid != orig_parent_pid:
             return
         # on some systems, getppid will keep returning
         # a dead pid, so check it for liveness
         try:
             os.kill(ppid, 0)
-        except OSError: # Probably ENOSUCH
+        except OSError:  # Probably ENOSUCH
             return
 
 script_fns = {}
+
+
 def script(fn):
-    script_fns[fn.func_name] = fn
+    script_fns[fn.__name__] = fn
     return fn
 
 # scripts
+
 
 @script
 def write_pidfile_and_sleep():
     pidfile = sys.argv[2]
     write_pidfile(pidfile)
     sleep_forever()
+
 
 @script
 def spawn_child():
@@ -72,19 +79,23 @@ def spawn_child():
         write_pidfile(parent_pidfile)
     sleep_forever()
 
+
 @script
 def double_fork():
     # when using a PTY, the child process will get SIGHUP when the
     # parent process exits, so ignore that.
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
     parent_pidfile, child_pidfile = sys.argv[2:]
+    parent_pid = os.getpid()
+
     if os.fork() == 0:
-        wait_for_parent_death()
+        wait_for_parent_death(parent_pid)
         write_pidfile(child_pidfile)
         sleep_forever()
     else:
         write_pidfile(parent_pidfile)
         sys.exit(0)
+
 
 @script
 def assert_stdin_closed():
@@ -93,15 +104,16 @@ def assert_stdin_closed():
     bail_at = time.time() + 10
     while True:
         r, w, x = select.select([0], [], [], 0.01)
-        if r == [0]: return # succcess!
+        if r == [0]:
+            return  # succcess!
         if time.time() > bail_at:
-            assert False # failure :(
+            assert False  # failure :(
 
 # make sure this process dies if necessary
 
 if not hasattr(signal, 'alarm'):
-    signal.alarm = lambda t : None
-signal.alarm(110) # die after 110 seconds
+    signal.alarm = lambda t: None
+signal.alarm(110)  # die after 110 seconds
 
 # dispatcher
 

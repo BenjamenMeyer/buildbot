@@ -13,19 +13,22 @@
 #
 # Copyright Buildbot Team Members
 
-import mock
 import StringIO
-from zope.interface import implements
-from twisted.trial import unittest
+import mock
+
 from buildbot import interfaces
+from buildbot.process.results import FAILURE
+from buildbot.process.results import SUCCESS
 from buildbot.steps import subunit
-from buildbot.process import subunitlogobserver
-from buildbot.status.results import SUCCESS, FAILURE
 from buildbot.test.fake.remotecommand import ExpectShell
 from buildbot.test.util import steps
+from twisted.trial import unittest
+from zope.interface import implements
+
 
 class StubLogObserver(mock.Mock):
     implements(interfaces.ILogObserver)
+
 
 class TestSetPropertiesFromEnv(steps.BuildStepMixin, unittest.TestCase):
 
@@ -36,8 +39,8 @@ class TestSetPropertiesFromEnv(steps.BuildStepMixin, unittest.TestCase):
         self.logobserver.skips = []
         self.logobserver.testsRun = 0
         self.logobserver.warningio = StringIO.StringIO()
-        self.patch(subunitlogobserver, 'SubunitLogObserver',
-                                lambda : self.logobserver)
+        self.patch(subunit, 'SubunitLogObserver',
+                   lambda: self.logobserver)
         return self.setUpBuildStep()
 
     def tearDown(self):
@@ -51,19 +54,19 @@ class TestSetPropertiesFromEnv(steps.BuildStepMixin, unittest.TestCase):
             + 0
         )
         self.expectOutcome(result=SUCCESS,
-                status_text=["shell", "no tests", "run"])
+                           state_string="shell no tests run")
         return self.runStep()
 
     def test_empty_error(self):
         self.setupStep(subunit.SubunitShellCommand(command='test',
-                failureOnNoTests=True))
+                                                   failureOnNoTests=True))
         self.expectCommands(
             ExpectShell(workdir='wkdir', usePTY='slave-config',
                         command="test")
             + 0
         )
         self.expectOutcome(result=FAILURE,
-                status_text=["shell", "no tests", "run"])
+                           state_string="shell no tests run (failure)")
         return self.runStep()
 
     def test_warnings(self):
@@ -76,8 +79,8 @@ class TestSetPropertiesFromEnv(steps.BuildStepMixin, unittest.TestCase):
         self.logobserver.warnings.append('not quite up to snuff (list)')
         self.logobserver.warningio.write('not quite up to snuff (io)\n')
         self.logobserver.testsRun = 3
-        self.expectOutcome(result=SUCCESS, # N.B. not WARNINGS
-                status_text=["shell", "3 tests", "passed"])
+        self.expectOutcome(result=SUCCESS,  # N.B. not WARNINGS
+                           state_string="shell 3 tests passed")
         # note that the warnings list is ignored..
         self.expectLogfile('warnings', 'not quite up to snuff (io)\n')
         return self.runStep()

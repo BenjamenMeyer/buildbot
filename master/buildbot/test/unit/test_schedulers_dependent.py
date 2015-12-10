@@ -13,16 +13,24 @@
 #
 # Copyright Buildbot Team Members
 
-from twisted.trial import unittest
-from buildbot.schedulers import dependent, base
-from buildbot.status.results import SUCCESS, WARNINGS, FAILURE
-from buildbot.test.util import scheduler
+from buildbot import config
+from buildbot.schedulers import base
+from buildbot.schedulers import dependent
+from buildbot.process.results import FAILURE
+from buildbot.process.results import SUCCESS
+from buildbot.process.results import WARNINGS
 from buildbot.test.fake import fakedb
+from buildbot.test.util import scheduler
+from twisted.internet import defer
+from twisted.trial import unittest
+
+SUBMITTED_AT_TIME = 111111111
+COMPLETE_AT_TIME = 222222222
+OBJECTID = 33
+UPSTREAM_NAME = u'uppy'
+
 
 class Dependent(scheduler.SchedulerMixin, unittest.TestCase):
-
-    SCHEDULERID = 33
-    UPSTREAM_NAME = 'uppy'
 
     def setUp(self):
         self.setUpScheduler()
@@ -30,17 +38,26 @@ class Dependent(scheduler.SchedulerMixin, unittest.TestCase):
     def tearDown(self):
         self.tearDownScheduler()
 
-    def makeScheduler(self, **kwargs):
+    def makeScheduler(self, upstream=None):
         # build a fake upstream scheduler
         class Upstream(base.BaseScheduler):
+
             def __init__(self, name):
                 self.name = name
-        upstream = Upstream(self.UPSTREAM_NAME)
+        if not upstream:
+            upstream = Upstream(UPSTREAM_NAME)
 
         sched = dependent.Dependent(name='n', builderNames=['b'],
                                     upstream=upstream)
-        self.attachScheduler(sched, self.SCHEDULERID)
+        self.attachScheduler(sched, OBJECTID,
+                             overrideBuildsetMethods=True,
+                             createBuilderDB=True)
+
         return sched
+
+    def assertBuildsetSubscriptions(self, bsids=None):
+        self.db.state.assertState(OBJECTID,
+                                  upstream_bsids=bsids)
 
     # tests
 
@@ -49,69 +66,134 @@ class Dependent(scheduler.SchedulerMixin, unittest.TestCase):
     # The Deferred from trigger() is completely processed before this test
     # method returns.
 
-    def test_startService(self):
+    def test_constructor_string_arg(self):
+        self.assertRaises(config.ConfigErrors,
+                          lambda: self.makeScheduler(upstream='foo'))
+
+    def test_activate(self):
         sched = self.makeScheduler()
-        sched.startService()
+        sched.activate()
 
-        callbacks = self.master.getSubscriptionCallbacks()
-        self.assertNotEqual(callbacks['buildsets'], None)
-        self.assertNotEqual(callbacks['buildset_completion'], None)
+        self.assertEqual(
+            sorted([q.filter for q in sched.master.mq.qrefs]),
+            [('buildsets', None, 'complete',), ('buildsets', None, 'new',)])
 
-        d = sched.stopService()
+        d = sched.deactivate()
+
         def check(_):
-            callbacks = self.master.getSubscriptionCallbacks()
-            self.assertEqual(callbacks['buildsets'], None)
-            self.assertEqual(callbacks['buildset_completion'], None)
+            self.assertEqual([q.filter for q in sched.master.mq.qrefs], [])
         d.addCallback(check)
         return d
 
-    def do_test(self, scheduler_name, expect_subscription,
-            result, expect_buildset):
-        sched = self.makeScheduler()
-        sched.startService()
-        callbacks = self.master.getSubscriptionCallbacks()
+    def sendBuildsetMessage(self, scheduler_name=None, results=-1,
+                            complete=False):
+        """Call callConsumer with a buildset message.  Most of the values here
+        are hard-coded to correspond to those in do_test."""
+        msg = dict(
+            bsid=44,
+            sourcestamps=[],  # blah blah blah
+            submitted_at=SUBMITTED_AT_TIME,
+            complete=complete,
+            complete_at=COMPLETE_AT_TIME if complete else None,
+            external_idstring=None,
+            reason=u'Because',
+            results=results if complete else -1,
+            parent_buildid=None,
+            parent_relationship=None,
+        )
+        if not complete:
+            msg['scheduler'] = scheduler_name
+        self.master.mq.callConsumer(
+            ('buildsets', '44', 'complete' if complete else 'new'),
+            msg)
 
-        # pretend we saw a buildset with a matching name
+    def do_test(self, scheduler_name, expect_subscription,
+                results, expect_buildset):
+        """Test the dependent scheduler by faking a buildset and subsequent
+        completion from an upstream scheduler.
+
+        @param scheduler_name: upstream scheduler's name
+        @param expect_subscription: whether to expect the dependent to
+            subscribe to the buildset
+        @param results: results of the upstream scheduler's buildset
+        @param expect_buidlset: whether to expect the dependent to generate
+            a new buildset in response
+        """
+
+        sched = self.makeScheduler()
+        sched.activate()
+
+        # announce a buildset with a matching name..
         self.db.insertTestData([
-            fakedb.SourceStamp(id=93, revision='555', branch='master',
-                                project='proj', repository='repo'),
-            fakedb.Buildset(id=44, sourcestampid=93),
-            ])
-        callbacks['buildsets'](bsid=44,
-                properties=dict(scheduler=(scheduler_name, 'Scheduler')))
+            fakedb.SourceStamp(id=93, revision='555',
+                               branch='master', project='proj', repository='repo',
+                               codebase='cb'),
+            fakedb.Buildset(
+                id=44,
+                submitted_at=SUBMITTED_AT_TIME,
+                complete=False,
+                complete_at=None,
+                external_idstring=None,
+                reason=u'Because',
+                results=-1,
+            ),
+            fakedb.BuildsetSourceStamp(buildsetid=44, sourcestampid=93),
+        ])
+        self.sendBuildsetMessage(scheduler_name=scheduler_name, complete=False)
 
         # check whether scheduler is subscribed to that buildset
         if expect_subscription:
-            self.db.buildsets.assertBuildsetSubscriptions((self.SCHEDULERID, 44))
+            self.assertBuildsetSubscriptions([44])
         else:
-            self.db.buildsets.assertBuildsetSubscriptions()
+            self.assertBuildsetSubscriptions([])
 
         # pretend that the buildset is finished
-        self.db.buildsets.fakeBuildsetCompletion(bsid=44, result=result)
-        callbacks['buildset_completion'](44, result)
+        self.db.buildsets.fakeBuildsetCompletion(bsid=44, result=results)
+        self.sendBuildsetMessage(results=results, complete=True)
 
         # and check whether a buildset was added in response
         if expect_buildset:
-            self.db.buildsets.assertBuildsets(2)
-            bsids = self.db.buildsets.allBuildsetIds()
-            bsids.remove(44)
-            self.db.buildsets.assertBuildset(bsids[0],
-                    dict(external_idstring=None,
-                         properties=[('scheduler', ('n', 'Scheduler'))],
-                         reason='downstream'),
-                    dict(revision='555', branch='master', project='proj',
-                         repository='repo'))
+            self.assertEqual(self.addBuildsetCalls, [
+                ('addBuildsetForSourceStamps', dict(
+                    builderNames=None,  # defaults
+                    external_idstring=None,
+                    properties=None,
+                    reason=u'downstream',
+                    sourcestamps=[93])),
+            ])
         else:
-            self.db.buildsets.assertBuildsets(1) # only the one we added above
+            self.assertEqual(self.addBuildsetCalls, [])
 
     def test_related_buildset_SUCCESS(self):
-        return self.do_test(self.UPSTREAM_NAME, True, SUCCESS, True)
+        return self.do_test(UPSTREAM_NAME, True, SUCCESS, True)
 
     def test_related_buildset_WARNINGS(self):
-        return self.do_test(self.UPSTREAM_NAME, True, WARNINGS, True)
+        return self.do_test(UPSTREAM_NAME, True, WARNINGS, True)
 
     def test_related_buildset_FAILURE(self):
-        return self.do_test(self.UPSTREAM_NAME, True, FAILURE, False)
+        return self.do_test(UPSTREAM_NAME, True, FAILURE, False)
 
     def test_unrelated_buildset(self):
-        return self.do_test('unrelated', False, SUCCESS, False)
+        return self.do_test(u'unrelated', False, SUCCESS, False)
+
+    @defer.inlineCallbacks
+    def test_getUpstreamBuildsets_missing(self):
+        sched = self.makeScheduler()
+
+        # insert some state, with more bsids than exist
+        self.db.insertTestData([
+            fakedb.SourceStamp(id=1234),
+            fakedb.Buildset(id=11),
+            fakedb.Buildset(id=13),
+            fakedb.BuildsetSourceStamp(buildsetid=13, sourcestampid=1234),
+            fakedb.Object(id=OBJECTID),
+            fakedb.ObjectState(objectid=OBJECTID,
+                               name='upstream_bsids', value_json='[11,12,13]'),
+        ])
+
+        # check return value (missing 12)
+        self.assertEqual((yield sched._getUpstreamBuildsets()),
+                         [(11, [], False, -1), (13, [1234], False, -1)])
+
+        # and check that it wrote the correct value back to the state
+        self.db.state.assertState(OBJECTID, upstream_bsids=[11, 13])

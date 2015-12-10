@@ -1,15 +1,18 @@
 import urllib
 
-from twisted.python import log
 from twisted.internet import reactor
-from twisted.web import client, error
+from twisted.python import log
+from twisted.web import client
+from twisted.web import error
 
 from buildbot import status
 
-MAX_ATTEMPTS     = 10
+MAX_ATTEMPTS = 10
 RETRY_MULTIPLIER = 5
 
+
 class WebHookTransmitter(status.base.StatusReceiverMultiService):
+
     """
     A webhook status listener for buildbot.
 
@@ -43,7 +46,7 @@ class WebHookTransmitter(status.base.StatusReceiverMultiService):
 
     agent = 'buildbot webhook'
 
-    def __init__(self, url, categories=None, extra_params={},
+    def __init__(self, url, categories=None, extra_params=None,
                  max_attempts=MAX_ATTEMPTS, retry_multiplier=RETRY_MULTIPLIER):
         status.base.StatusReceiverMultiService.__init__(self)
         if isinstance(url, basestring):
@@ -51,11 +54,15 @@ class WebHookTransmitter(status.base.StatusReceiverMultiService):
         else:
             self.urls = url
         self.categories = categories
+        if extra_params is None:
+            extra_params = {}
         self.extra_params = extra_params
         self.max_attempts = max_attempts
         self.retry_multiplier = retry_multiplier
 
-    def _transmit(self, event, params={}):
+    def _transmit(self, event, params=None):
+        if params is None:
+            params = {}
 
         cat = dict(params).get('category', None)
         if (cat and self.categories) and cat not in self.categories:
@@ -109,7 +116,7 @@ class WebHookTransmitter(status.base.StatusReceiverMultiService):
                      501)
 
         d.addCallback(lambda x: log.msg("Completed %s event hook on attempt %d" %
-                                        (event, attempt+1)))
+                                        (event, attempt + 1)))
         d.addErrback(_maybe_retry)
         d.addErrback(lambda e: log.err("Giving up delivering %s to %s" % (event, u)))
 
@@ -170,9 +177,7 @@ class WebHookTransmitter(status.base.StatusReceiverMultiService):
         self.status.subscribe(self)
 
     def setServiceParent(self, parent):
-        status.base.StatusReceiverMultiService.setServiceParent(self, parent)
         self.status = parent.getStatus()
-
         self._transmit('startup')
-
         self._subscribe()
+        return status.base.StatusReceiverMultiService.setServiceParent(self, parent)

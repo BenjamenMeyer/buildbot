@@ -16,7 +16,7 @@
 from twisted.trial import unittest
 
 from buildbot.util import subscription
-from buildbot.test.util import compat
+
 
 class subscriptions(unittest.TestCase):
 
@@ -28,6 +28,7 @@ class subscriptions(unittest.TestCase):
 
     def test_subscribe_unsubscribe(self):
         state = []
+
         def cb(*args, **kwargs):
             state.append((args, kwargs))
 
@@ -38,7 +39,7 @@ class subscriptions(unittest.TestCase):
 
         # deliver
         self.subpt.deliver(1, 2, a=3, b=4)
-        self.assertEqual(state, [((1,2), dict(a=3, b=4))])
+        self.assertEqual(state, [((1, 2), dict(a=3, b=4))])
         state.pop()
 
         # unsubscribe
@@ -48,7 +49,6 @@ class subscriptions(unittest.TestCase):
         self.subpt.deliver(3, 4)
         self.assertEqual(state, [])
 
-    @compat.usesFlushLoggedErrors
     def test_exception(self):
         def cb(*args, **kwargs):
             raise RuntimeError('mah bucket!')

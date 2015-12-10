@@ -13,10 +13,24 @@
 #
 # Copyright Buildbot Team Members
 
+from distutils.version import LooseVersion
+
 # apply the same patches the buildmaster does when it starts
 from buildbot import monkeypatches
-monkeypatches.patch_all()
+monkeypatches.patch_all(for_tests=True)
 
-# and some extras to aid debugging
-from buildbot.util import monkeypatches
-monkeypatches.add_debugging_monkeypatches()
+# enable deprecation warnings
+import warnings
+warnings.filterwarnings('always', category=DeprecationWarning)
+
+# import mock so we bail out early if it's not installed
+try:
+    import mock
+    mock = mock
+except ImportError:
+    raise ImportError("\nBuildbot tests require the 'mock' module; "
+                      "try 'pip install mock'")
+
+if LooseVersion(mock.__version__) < LooseVersion("0.8"):
+    raise ImportError("\nBuildbot tests require mock version 0.8.0 or "
+                      "higher; try 'pip install -U mock'")

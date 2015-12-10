@@ -14,41 +14,51 @@
 # Copyright Buildbot Team Members
 
 
-from twisted.spread import pb
 from twisted.cred import credentials
 from twisted.internet import reactor
+from twisted.spread import pb
+
 
 class Sender:
-    def __init__(self, master, auth=('change','changepw'), encoding='utf8'):
+
+    def __init__(self, master, auth=('change', 'changepw'), encoding='utf8'):
         self.username, self.password = auth
         self.host, self.port = master.split(":")
         self.port = int(self.port)
         self.encoding = encoding
 
     def send(self, branch, revision, comments, files, who=None, category=None,
-             when=None, properties={}, repository='', vc=None, project='',
-             revlink=''):
+             when=None, properties=None, repository='', vc=None, project='',
+             revlink='', codebase=None):
+        if properties is None:
+            properties = {}
+
         change = {'project': project, 'repository': repository, 'who': who,
                   'files': files, 'comments': comments, 'branch': branch,
                   'revision': revision, 'category': category, 'when': when,
                   'properties': properties, 'revlink': revlink, 'src': vc}
 
+        # codebase is only sent if set; this won't work with masters older than
+        # 0.8.7
+        if codebase:
+            change['codebase'] = codebase
+
         for key in change:
-            if type(change[key]) == str:
+            if isinstance(change[key], str):
                 change[key] = change[key].decode(self.encoding, 'replace')
         change['files'] = list(change['files'])
         for i, file in enumerate(change.get('files', [])):
-            if type(file) == str:
+            if isinstance(file, str):
                 change['files'][i] = file.decode(self.encoding, 'replace')
 
         f = pb.PBClientFactory()
         d = f.login(credentials.UsernamePassword(self.username, self.password))
         reactor.connectTCP(self.host, self.port, f)
 
+        @d.addCallback
         def call_addChange(remote):
             d = remote.callRemote('addChange', change)
             d.addCallback(lambda res: remote.broker.transport.loseConnection())
             return d
-        d.addCallback(call_addChange)
 
         return d

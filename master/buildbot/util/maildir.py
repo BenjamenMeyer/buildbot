@@ -20,41 +20,34 @@
 # relative to the top of the maildir (so it will look like "new/blahblah").
 
 import os
-from twisted.python import log, runtime
-from twisted.application import service, internet
-from twisted.internet import reactor, defer
+
+from buildbot.util import service
+from twisted.application import internet
+from twisted.internet import defer
+from twisted.internet import reactor
+from twisted.python import log
+from twisted.python import runtime
 dnotify = None
 try:
     import dnotify
-except:
+except ImportError:
     log.msg("unable to import dnotify, so Maildir will use polling instead")
+
 
 class NoSuchMaildir(Exception):
     pass
 
-class MaildirService(service.MultiService):
-    """I watch a maildir for new messages. I should be placed as the service
-    child of some MultiService instance. When running, I use the linux
-    dirwatcher API (if available) or poll for new files in the 'new'
-    subdirectory of my maildir path. When I discover a new message, I invoke
-    my .messageReceived() method with the short filename of the new message,
-    so the full name of the new file can be obtained with
-    os.path.join(maildir, 'new', filename). messageReceived() should be
-    overridden by a subclass to do something useful. I will not move or
-    delete the file on my own: the subclass's messageReceived() should
-    probably do that.
-    """
+
+class MaildirService(service.AsyncMultiService):
     pollinterval = 10  # only used if we don't have DNotify
 
     def __init__(self, basedir=None):
-        """Create the Maildir watcher. BASEDIR is the maildir directory (the
-        one which contains new/ and tmp/)
-        """
-        service.MultiService.__init__(self)
+        service.AsyncMultiService.__init__(self)
         if basedir:
             self.setBasedir(basedir)
         self.files = []
         self.dnotify = None
+        self.timerService = None
 
     def setBasedir(self, basedir):
         # some users of MaildirService (scheduler.Try_Jobdir, in particular)
@@ -66,7 +59,6 @@ class MaildirService(service.MultiService):
         self.curdir = os.path.join(self.basedir, "cur")
 
     def startService(self):
-        service.MultiService.startService(self)
         if not os.path.isdir(self.newdir) or not os.path.isdir(self.curdir):
             raise NoSuchMaildir("invalid maildir '%s'" % self.basedir)
         try:
@@ -82,9 +74,10 @@ class MaildirService(service.MultiService):
             # because of a python bug
             log.msg("DNotify failed, falling back to polling")
         if not self.dnotify:
-            t = internet.TimerService(self.pollinterval, self.poll)
-            t.setServiceParent(self)
+            self.timerService = internet.TimerService(self.pollinterval, self.poll)
+            self.timerService.setServiceParent(self)
         self.poll()
+        return service.AsyncMultiService.startService(self)
 
     def dnotify_callback(self):
         log.msg("dnotify noticed something, now polling")
@@ -100,43 +93,37 @@ class MaildirService(service.MultiService):
 
         reactor.callLater(0.1, self.poll)
 
-
     def stopService(self):
         if self.dnotify:
             self.dnotify.remove()
             self.dnotify = None
-        return service.MultiService.stopService(self)
+        if self.timerService is not None:
+            self.timerService.disownServiceParent()
+            self.timerService = None
+        return service.AsyncMultiService.stopService(self)
 
-    @defer.deferredGenerator
+    @defer.inlineCallbacks
     def poll(self):
-        assert self.basedir
-        # see what's new
-        for f in self.files:
-            if not os.path.isfile(os.path.join(self.newdir, f)):
-                self.files.remove(f)
-        newfiles = []
-        for f in os.listdir(self.newdir):
-            if not f in self.files:
-                newfiles.append(f)
-        self.files.extend(newfiles)
-        for n in newfiles:
-            try:
-                wfd = defer.waitForDeferred(self.messageReceived(n))
-                yield wfd
-                wfd.getResult()
-            except:
-                log.msg("while reading '%s' from maildir '%s':" % (n, self.basedir))
-                log.err()
+        try:
+            assert self.basedir
+            # see what's new
+            for f in self.files:
+                if not os.path.isfile(os.path.join(self.newdir, f)):
+                    self.files.remove(f)
+            newfiles = []
+            for f in os.listdir(self.newdir):
+                if f not in self.files:
+                    newfiles.append(f)
+            self.files.extend(newfiles)
+            for n in newfiles:
+                try:
+                    yield self.messageReceived(n)
+                except Exception:
+                    log.err(None, "while reading '%s' from maildir '%s':" % (n, self.basedir))
+        except Exception:
+            log.err(None, "while polling maildir '%s':" % (self.basedir,))
 
     def moveToCurDir(self, filename):
-        """
-        Call this from messageReceived to start processing the message; this
-        moves the message file to the 'cur' directory and returns an open file
-        handle for it.
-
-        @param filename: unqualified filename of the message
-        @returns: open file
-        """
         if runtime.platformType == "posix":
             # open the file before moving it, because I'm afraid that once
             # it's in cur/, someone might delete it at any moment
@@ -156,6 +143,4 @@ class MaildirService(service.MultiService):
         return f
 
     def messageReceived(self, filename):
-        """Process a received message.  The filename is relative to self.newdir.
-        Returns a Deferred."""
         raise NotImplementedError

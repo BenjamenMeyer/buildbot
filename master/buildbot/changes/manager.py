@@ -13,13 +13,17 @@
 #
 # Copyright Buildbot Team Members
 
-from zope.interface import implements
-from twisted.internet import defer
-from twisted.application import service
-
 from buildbot import interfaces
+from buildbot import util
+from buildbot.process import metrics
+from buildbot.util import service
+from twisted.internet import defer
+from twisted.python import log
+from zope.interface import implements
 
-class ChangeManager(service.MultiService):
+
+class ChangeManager(service.ReconfigurableServiceMixin, service.AsyncMultiService):
+
     """
     This is the master-side service which receives file change notifications
     from version-control systems.
@@ -31,29 +35,35 @@ class ChangeManager(service.MultiService):
 
     implements(interfaces.IEventSource)
 
-    lastPruneChanges = None
-    name = "changemanager"
+    name = "change_manager"
 
-    def __init__(self):
-        service.MultiService.__init__(self)
-        self.master = None
-        self.lastPruneChanges = 0
+    @defer.inlineCallbacks
+    def reconfigServiceWithBuildbotConfig(self, new_config):
+        timer = metrics.Timer("ChangeManager.reconfigServiceWithBuildbotConfig")
+        timer.start()
 
-    def startService(self):
-        service.MultiService.startService(self)
-        self.master = self.parent
+        removed, added = util.diffSets(
+            set(self),
+            new_config.change_sources)
 
-    def addSource(self, source):
-        assert interfaces.IChangeSource.providedBy(source)
-        assert service.IService.providedBy(source)
-        source.master = self.master
-        source.setServiceParent(self)
+        if removed or added:
+            log.msg("adding %d new changesources, removing %d" %
+                    (len(added), len(removed)))
 
-    def removeSource(self, source):
-        assert source in self
-        d = defer.maybeDeferred(source.disownServiceParent)
-        def unset_master(x):
-            source.master = None
-            return x
-        d.addBoth(unset_master)
-        return d
+            for src in removed:
+                yield src.deactivate()
+                yield defer.maybeDeferred(
+                    src.disownServiceParent)
+
+            for src in added:
+                yield src.setServiceParent(self)
+
+        num_sources = len(list(self))
+        assert num_sources == len(new_config.change_sources)
+        metrics.MetricCountEvent.log("num_sources", num_sources, absolute=True)
+
+        # reconfig any newly-added change sources, as well as existing
+        yield service.ReconfigurableServiceMixin.reconfigServiceWithBuildbotConfig(self,
+                                                                                   new_config)
+
+        timer.stop()

@@ -13,26 +13,82 @@
 #
 # Copyright Buildbot Team Members
 
+from StringIO import StringIO
 from mock import Mock
 
 from twisted.internet import defer
+from twisted.web import server
 
-class MockRequest(Mock):
+
+def fakeMasterForHooks():
+    master = Mock()
+    master.addedChanges = []
+
+    def addChange(**kwargs):
+        master.addedChanges.append(kwargs)
+        return defer.succeed(Mock())
+    master.addChange = addChange
+    return master
+
+
+class FakeRequest(Mock):
+
     """
     A fake Twisted Web Request object, including some pointers to the
     buildmaster and an addChange method on that master which will append its
     arguments to self.addedChanges.
     """
-    def __init__(self, args={}):
+
+    written = ''
+    finished = False
+    redirected_to = None
+    failure = None
+
+    def __init__(self, args=None, content=''):
+        Mock.__init__(self)
+
+        if args is None:
+            args = {}
+
         self.args = args
+        self.content = StringIO(content)
         self.site = Mock()
         self.site.buildbot_service = Mock()
-        master = self.site.buildbot_service.master = Mock()
+        self.uri = '/'
+        self.prepath = []
+        self.method = 'GET'
+        self.received_headers = {}
 
-        self.addedChanges = []
-        def addChange(**kwargs):
-            self.addedChanges.append(kwargs)
-            return defer.succeed(Mock())
-        master.addChange = addChange
+        self.deferred = defer.Deferred()
 
-        Mock.__init__(self)
+    def getHeader(self, key):
+        return self.received_headers.get(key)
+
+    def write(self, data):
+        self.written = self.written + data
+
+    def redirect(self, url):
+        self.redirected_to = url
+
+    def finish(self):
+        self.finished = True
+        self.deferred.callback(None)
+
+    def processingFailed(self, f):
+        self.deferred.errback(f)
+
+    # work around http://code.google.com/p/mock/issues/detail?id=105
+    def _get_child_mock(self, **kw):
+        return Mock(**kw)
+
+    # cribed from twisted.web.test._util._render
+    def test_render(self, resource):
+        result = resource.render(self)
+        if isinstance(result, str):
+            self.write(result)
+            self.finish()
+            return self.deferred
+        elif result is server.NOT_DONE_YET:
+            return self.deferred
+        else:
+            raise ValueError("Unexpected return value: %r" % (result,))

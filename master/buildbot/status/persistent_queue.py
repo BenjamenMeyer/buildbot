@@ -13,32 +13,33 @@
 #
 # Copyright Buildbot Team Members
 
-
-from collections import deque
 import os
-import cPickle as pickle
 
-from zope.interface import implements, Interface
+from buildbot.util import pickle
+from collections import deque
+
+from zope.interface import Interface
+from zope.interface import implements
 
 
 def ReadFile(path):
-    f = open(path, 'rb')
-    try:
+    with open(path, 'rb') as f:
         return f.read()
-    finally:
-        f.close()
 
 
 def WriteFile(path, buf):
-    f = open(path, 'wb')
-    try:
+    with open(path, 'wb') as f:
         f.write(buf)
-    finally:
-        f.close()
 
 
 class IQueue(Interface):
+
     """Abstraction of a queue."""
+
+    # disable pylint warnings triggered by this interface definition
+    # pylint: disable=no-self-argument
+    # pylint: disable=no-method-argument
+
     def pushItem(item):
         """Adds an individual item to the end of the queue.
 
@@ -71,6 +72,7 @@ class IQueue(Interface):
 
 
 class MemoryQueue(object):
+
     """Simple length bounded queue using deque.
 
     list.pop(0) operation is O(n) so for a 10000 items list, it can start to
@@ -128,6 +130,7 @@ class MemoryQueue(object):
 
 
 class DiskQueue(object):
+
     """Keeps a list of abstract items and serializes it to the disk.
 
     Use pickle for serialization."""
@@ -223,7 +226,7 @@ class DiskQueue(object):
     def maxItems(self):
         return self._maxItems
 
-    #### Protected functions
+    # Protected functions
 
     def _findNext(self, id):
         while True:
@@ -243,8 +246,7 @@ class DiskQueue(object):
             except ValueError:
                 return None
 
-        files = filter(None, [SafeInt(x) for x in os.listdir(self.path)])
-        files.sort()
+        files = sorted(filter(None, [SafeInt(x) for x in os.listdir(self.path)]))
         self._nbItems = len(files)
         if self._nbItems:
             self.firstItemId = files[0]
@@ -252,6 +254,7 @@ class DiskQueue(object):
 
 
 class PersistentQueue(object):
+
     """Keeps a list of abstract items and serializes it to the disk.
 
     It has 2 layers of queue, normally an in-memory queue and an on-disk queue.
@@ -284,7 +287,7 @@ class PersistentQueue(object):
         # all to start inserting them into primaryQueue so don't bother and
         # just push it in secondaryQueue.
         if (self.secondaryQueue.nbItems() or
-            self.primaryQueue.nbItems() == self.primaryQueue.maxItems()):
+                self.primaryQueue.nbItems() == self.primaryQueue.maxItems()):
             item = self.secondaryQueue.pushItem(item)
             if item is None:
                 return item
@@ -339,6 +342,7 @@ class PersistentQueue(object):
 
 
 class IndexedQueue(object):
+
     """Adds functionality to a IQueue object to track its usage.
 
     Adds a new member function getIndex() and modify popChunk() and
@@ -350,6 +354,7 @@ class IndexedQueue(object):
         # Copy all the member functions from the other object that this class
         # doesn't already define.
         assert IQueue.providedBy(queue)
+
         def Filter(m):
             return (m[0] != '_' and callable(getattr(queue, m))
                     and not hasattr(self, m))

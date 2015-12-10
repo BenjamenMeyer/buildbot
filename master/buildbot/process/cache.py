@@ -12,10 +12,14 @@
 # Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
 # Copyright Buildbot Team Members
+from future.utils import iteritems
 
 from buildbot.util import lru
+from buildbot.util import service
 
-class CacheManager(object):
+
+class CacheManager(service.ReconfigurableServiceMixin, service.AsyncService):
+
     """
     A manager for a collection of caches, each for different types of objects
     and with potentially-overlapping key spaces.
@@ -30,6 +34,7 @@ class CacheManager(object):
     DEFAULT_CACHE_SIZE = 1
 
     def __init__(self):
+        self.setName('caches')
         self.config = {}
         self._caches = {}
 
@@ -54,13 +59,17 @@ class CacheManager(object):
             c = self._caches[cache_name] = lru.AsyncLRUCache(miss_fn, max_size)
             return c
 
-    def load_config(self, new_config):
-        self.config = new_config
-        for name, cache in self._caches.iteritems():
-            cache.set_max_size(new_config.get(name, self.DEFAULT_CACHE_SIZE))
+    def reconfigServiceWithBuildbotConfig(self, new_config):
+        self.config = new_config.caches
+        for name, cache in iteritems(self._caches):
+            cache.set_max_size(new_config.caches.get(name,
+                                                     self.DEFAULT_CACHE_SIZE))
+
+        return service.ReconfigurableServiceMixin.reconfigServiceWithBuildbotConfig(self,
+                                                                                    new_config)
 
     def get_metrics(self):
         return dict([
             (n, dict(hits=c.hits, refhits=c.refhits,
                      misses=c.misses, max_size=c.max_size))
-            for n, c in self._caches.iteritems()])
+            for n, c in iteritems(self._caches)])

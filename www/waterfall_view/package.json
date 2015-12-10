@@ -1,0 +1,10 @@
+{
+    "name": "buildbot-waterfall_view",
+    "engines": {
+        "node": ">=0.10.20",
+        "npm": ">=1.4.10"
+    },
+    "devDependencies": {
+        "guanlecoja": "~0.4.0"
+    }
+}

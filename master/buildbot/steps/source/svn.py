@@ -14,278 +14,243 @@
 # Copyright Buildbot Team Members
 # Portions Copyright 2011 MerMec Inc.
 
-import xml
+from future.moves.urllib.parse import quote as urlquote
+from future.moves.urllib.parse import unquote as urlunquote
+from future.moves.urllib.parse import urlparse
+from future.moves.urllib.parse import urlunparse
 
-from twisted.python import log
+import re
+import xml.dom.minidom
+import xml.parsers.expat
+
+from string import lower
+
 from twisted.internet import defer
+from twisted.internet import reactor
+from twisted.python import log
 
+from buildbot.config import ConfigErrors
 from buildbot.process import buildstep
-from buildbot.steps.source import Source
-from buildbot.interfaces import BuildSlaveTooOldError
+from buildbot.process import remotecommand
+from buildbot.steps.source.base import Source
 
 
 class SVN(Source):
+
     """I perform Subversion checkout/update operations."""
 
     name = 'svn'
-    branch_placeholder = '%%BRANCH%%'
 
-    renderables = [ 'svnurl', 'baseURL' ]
+    renderables = ['repourl']
+    possible_methods = ('clean', 'fresh', 'clobber', 'copy', 'export', None)
 
-    def __init__(self, svnurl=None, baseURL=None, mode='incremental',
-                 method=None, defaultBranch=None, username=None,
+    def __init__(self, repourl=None, mode='incremental',
+                 method=None, username=None,
                  password=None, extra_args=None, keep_on_purge=None,
-                 depth=None, outputdir=None, **kwargs):
+                 depth=None, preferLastChangedRev=False, **kwargs):
 
-        self.svnurl = svnurl
-        self.baseURL = baseURL
-        self.branch = defaultBranch
+        self.repourl = repourl
         self.username = username
         self.password = password
         self.extra_args = extra_args
         self.keep_on_purge = keep_on_purge or []
         self.depth = depth
-        self.method=method
+        self.method = method
         self.mode = mode
-        self.outputdir = outputdir
+        self.preferLastChangedRev = preferLastChangedRev
         Source.__init__(self, **kwargs)
-        self.addFactoryArguments(svnurl=svnurl,
-                                 baseURL=baseURL,
-                                 mode=mode,
-                                 method=method,
-                                 defaultBranch=defaultBranch,
-                                 outputdir=self.outputdir,
-                                 password=password,
-                                 username=username,
-                                 extra_args=extra_args,
-                                 keep_on_purge=keep_on_purge,
-                                 depth=depth,
-                                 )
+        errors = []
+        if not self._hasAttrGroupMember('mode', self.mode):
+            errors.append("mode %s is not one of %s" %
+                          (self.mode, self._listAttrGroupMembers('mode')))
+        if self.method not in self.possible_methods:
+            errors.append("method %s is not one of %s" % (self.method, self.possible_methods))
 
-        assert self.mode in ['incremental', 'full']
-        assert self.method in ['clean', 'fresh', 'clobber', 'copy', None]
+        if repourl is None:
+            errors.append("you must provide repourl")
 
-        if svnurl and baseURL:
-            raise ValueError("you must provide exactly one of svnurl and"
-                             " baseURL")
-
-        if svnurl is None and baseURL is None:
-            raise ValueError("you must privide at least one of svnurl and"
-                             " baseURL")
+        if errors:
+            raise ConfigErrors(errors)
 
     def startVC(self, branch, revision, patch):
         self.revision = revision
         self.method = self._getMethod()
-        self.svnurl = self.getSvnUrl(branch)
-        self.stdio_log = self.addLog("stdio")
+        self.stdio_log = self.addLogForRemoteCommands("stdio")
+
+        # if the version is new enough, and the password is set, then obfuscate it
+        if self.password is not None:
+            if not self.slaveVersionIsOlderThan('shell', '2.16'):
+                self.password = ('obfuscated', self.password, 'XXXXXX')
+            else:
+                log.msg("Slave does not understand obfuscation; "
+                        "svn password will be logged")
 
         d = self.checkSvn()
+
+        @d.addCallback
         def checkInstall(svnInstalled):
             if not svnInstalled:
-                raise BuildSlaveTooOldError("SVN is not installed on slave")
+                raise buildstep.BuildStepFailed("SVN is not installed on slave")
             return 0
 
-        if self.mode == 'full':
-            d.addCallback(self.full)
-        elif self.mode == 'incremental':
-            d.addCallback(self.incremental)
+        d.addCallback(lambda _: self.sourcedirIsPatched())
+
+        @d.addCallback
+        def checkPatched(patched):
+            if patched:
+                return self.purge(False)
+            else:
+                return 0
+
+        d.addCallback(self._getAttrGroupMember('mode', self.mode))
+
+        if patch:
+            d.addCallback(self.patch, patch)
         d.addCallback(self.parseGotRevision)
         d.addCallback(self.finish)
         d.addErrback(self.failed)
         return d
 
-    @defer.deferredGenerator
-    def full(self, _):
+    @defer.inlineCallbacks
+    def mode_full(self, _):
         if self.method == 'clobber':
-            wfd = defer.waitForDeferred(self.clobber())
-            yield wfd
-            wfd.getResult()
+            yield self.clobber()
             return
-        elif self.method == 'copy':
-            wfd = defer.waitForDeferred(self.copy())
-            yield wfd
-            wfd.getResult()
+        elif self.method in ['copy', 'export']:
+            yield self.copy()
             return
 
-        wfd = defer.waitForDeferred(self._sourcedirIsUpdatable())
-        yield wfd
-        updatable = wfd.getResult()
+        updatable = yield self._sourcedirIsUpdatable()
         if not updatable:
-            if self.outputdir:
-                d = self._dovccmd(['checkout', self.svnurl, self.outputdir])
-            else:
-                d = self._dovccmd(['checkout', self.svnurl, '.'])
+            # blow away the old (un-updatable) directory and checkout
+            yield self.clobber()
         elif self.method == 'clean':
-            d = self.clean()
+            yield self.clean()
         elif self.method == 'fresh':
-            d = self.fresh()
+            yield self.fresh()
 
-        wfd = defer.waitForDeferred(d)
-        yield wfd
-        wfd.getResult()
+    @defer.inlineCallbacks
+    def mode_incremental(self, _):
+        updatable = yield self._sourcedirIsUpdatable()
 
-    def incremental(self, _):
-        d = self._sourcedirIsUpdatable()
-        def _cmd(updatable):
-            if updatable:
-                if self.outputdir:
-                    command = ['update', self.outputdir]
-                else:
-                    command = ['update']
-            else:
-                if self.outputdir:
-                    command = ['checkout', self.svnurl, self.outputdir]
-                else:
-                    command = ['checkout', self.svnurl, '.' ]
+        if not updatable:
+            # blow away the old (un-updatable) directory and checkout
+            yield self.clobber()
+        else:
+            # otherwise, do an update
+            command = ['update']
             if self.revision:
                 command.extend(['--revision', str(self.revision)])
-            return command
+            yield self._dovccmd(command)
 
-        d.addCallback(_cmd)
-        d.addCallback(self._dovccmd)
-        return d
-
-    @defer.deferredGenerator
     def clobber(self):
-        if self.outputdir:
-            cmd = buildstep.LoggedRemoteCommand('rmdir', {'dir': self.workdir + '/' + self.outputdir,
-                                                          'logEnviron': self.logEnviron,})
-        else:
-            cmd = buildstep.LoggedRemoteCommand('rmdir', {'dir': self.workdir,
-                                                          'logEnviron': self.logEnviron,})
-
-        cmd.useLog(self.stdio_log, False)
-        wfd = defer.waitForDeferred(
-                self.runCommand(cmd))
-        yield wfd
-        wfd.getResult()
-        if cmd.rc != 0:
-            raise buildstep.BuildStepFailed()
-
-        if self.outputdir:
-            wfd = defer.waitForDeferred(
-                    self._dovccmd(['checkout', self.svnurl, self.outputdir]))
-        else:
-            wfd = defer.waitForDeferred(
-                    self._dovccmd(['checkout', self.svnurl, '.']))
-        yield wfd
-        wfd.getResult()
+        d = self.runRmdir(self.workdir)
+        d.addCallback(lambda _: self._checkout())
+        return d
 
     def fresh(self):
         d = self.purge(True)
-        if self.outputdir:
-            d.addCallback(lambda _: self._dovccmd(['update', self.outputdir]))
-        else:
-            d.addCallback(lambda _: self._dovccmd(['update']))
+        cmd = ['update']
+        if self.revision:
+            cmd.extend(['--revision', str(self.revision)])
+        d.addCallback(lambda _: self._dovccmd(cmd))
         return d
 
     def clean(self):
         d = self.purge(False)
-        if self.outputdir:
-            d.addCallback(lambda _: self._dovccmd(['update', self.outputdir]))
-        else:
-            d.addCallback(lambda _: self._dovccmd(['update']))
+        cmd = ['update']
+        if self.revision:
+            cmd.extend(['--revision', str(self.revision)])
+        d.addCallback(lambda _: self._dovccmd(cmd))
         return d
 
-    @defer.deferredGenerator
+    @defer.inlineCallbacks
     def copy(self):
-        if self.outputdir:
-            cmd = buildstep.LoggedRemoteCommand('rmdir', {'dir': self.workdir + '/' + self.outputdir,
-                                                          'logEnviron': self.logEnviron,})
-        else:
-            cmd = buildstep.LoggedRemoteCommand('rmdir', {'dir': self.workdir,
-                                                          'logEnviron': self.logEnviron,})
-            
-        cmd.useLog(self.stdio_log, False)
-        wfd = defer.waitForDeferred(
-                self.runCommand(cmd))
-        yield wfd
-        wfd.getResult()
+        yield self.runRmdir(self.workdir)
 
-        if cmd.rc != 0:
-            raise buildstep.BuildStepFailed()
-
+        checkout_dir = 'source'
+        if self.codebase:
+            checkout_dir = self.build.path_module.join(checkout_dir, self.codebase)
+        # temporarily set workdir = checkout_dir and do an incremental checkout
         try:
-            self.workdir = 'source'
-            wfd = defer.waitForDeferred(
-                    self.incremental(None))
-            yield wfd
-            wfd.getResult()
-        except: # finally doesn't work in python-2.4
-            self.workdir = 'build'
-            raise
-        self.workdir = 'build'
+            old_workdir = self.workdir
+            self.workdir = checkout_dir
+            yield self.mode_incremental(None)
+        finally:
+            self.workdir = old_workdir
+        self.workdir = old_workdir
 
-        cmd = buildstep.LoggedRemoteCommand('cpdir', 
-                    { 'fromdir': 'source', 'todir':'build',
-                      'logEnviron': self.logEnviron })
+        # if we're copying, copy; otherwise, export from source to build
+        if self.method == 'copy':
+            cmd = remotecommand.RemoteCommand('cpdir',
+                                              {'fromdir': checkout_dir, 'todir': self.workdir,
+                                               'logEnviron': self.logEnviron})
+        else:
+            export_cmd = ['svn', 'export']
+            if self.revision:
+                export_cmd.extend(["--revision", str(self.revision)])
+            if self.username:
+                export_cmd.extend(['--username', self.username])
+            if self.password is not None:
+                export_cmd.extend(['--password', self.password])
+            if self.extra_args:
+                export_cmd.extend(self.extra_args)
+            export_cmd.extend([checkout_dir, self.workdir])
+
+            cmd = remotecommand.RemoteShellCommand('', export_cmd,
+                                                   env=self.env, logEnviron=self.logEnviron, timeout=self.timeout)
         cmd.useLog(self.stdio_log, False)
-        wfd = defer.waitForDeferred(
-                self.runCommand(cmd))
-        yield wfd
-        wfd.getResult()
 
-        if cmd.rc != 0:
+        yield self.runCommand(cmd)
+
+        if cmd.didFail():
             raise buildstep.BuildStepFailed()
 
     def finish(self, res):
         d = defer.succeed(res)
+
+        @d.addCallback
         def _gotResults(results):
             self.setStatus(self.cmd, results)
             return results
-        d.addCallback(_gotResults)
-        d.addCallbacks(self.finished, self.checkDisconnect)
+        d.addCallback(self.finished)
         return d
 
-    def _dovccmd(self, command, collectStdout=False):
-        if not command:
-            raise ValueError("No command specified")
+    def _dovccmd(self, command, collectStdout=False, collectStderr=False, abandonOnFailure=True):
+        assert command, "No command specified"
         command.extend(['--non-interactive', '--no-auth-cache'])
         if self.username:
             command.extend(['--username', self.username])
-        if self.password:
+        if self.password is not None:
             command.extend(['--password', self.password])
         if self.depth:
             command.extend(['--depth', self.depth])
         if self.extra_args:
             command.extend(self.extra_args)
 
-        cmd = buildstep.RemoteShellCommand(self.workdir, ['svn'] + command,
-                                           env=self.env,
-                                           logEnviron=self.logEnviron,
-                                           collectStdout=collectStdout)
+        cmd = remotecommand.RemoteShellCommand(self.workdir, ['svn'] + command,
+                                               env=self.env,
+                                               logEnviron=self.logEnviron,
+                                               timeout=self.timeout,
+                                               collectStdout=collectStdout,
+                                               collectStderr=collectStderr)
         cmd.useLog(self.stdio_log, False)
-        log.msg("Starting SVN command : svn %s" % (" ".join(command), ))
         d = self.runCommand(cmd)
-        def evaluateCommand(cmd):
-            if cmd.rc != 0:
+
+        @d.addCallback
+        def evaluateCommand(_):
+            if cmd.didFail() and abandonOnFailure:
                 log.msg("Source step failed while running command %s" % cmd)
                 raise buildstep.BuildStepFailed()
-            if collectStdout:
+            if collectStdout and collectStderr:
+                return (cmd.stdout, cmd.stderr)
+            elif collectStdout:
                 return cmd.stdout
+            elif collectStderr:
+                return cmd.stderr
             else:
                 return cmd.rc
-        d.addCallback(lambda _: evaluateCommand(cmd))
         return d
-
-    def getSvnUrl(self, branch):
-        ''' Compute the svn url that will be passed to the svn remote command '''
-        if self.svnurl:
-            return self.svnurl
-        else:
-            if branch is None:
-                m = ("The SVN source step belonging to builder '%s' does not know "
-                     "which branch to work with. This means that the change source "
-                     "did not specify a branch and that defaultBranch is None." \
-                     % self.build.builder.name)
-                raise RuntimeError(m)
-
-            computed = self.baseURL
-
-            if self.branch_placeholder in self.baseURL:
-                return computed.replace(self.branch_placeholder, branch)
-            else:
-                return computed + branch
 
     def _getMethod(self):
         if self.method is not None and self.mode != 'incremental':
@@ -295,53 +260,79 @@ class SVN(Source):
         elif self.method is None and self.mode == 'full':
             return 'fresh'
 
+    @defer.inlineCallbacks
     def _sourcedirIsUpdatable(self):
-        if self.outputdir:
-            cmd = buildstep.LoggedRemoteCommand('stat', {'file': self.workdir + '/' + self.outputdir +'/.svn',
-                                            'logEnviron': self.logEnviron,})
-        else:
-            cmd = buildstep.LoggedRemoteCommand('stat', {'file': self.workdir +'/.svn',
-                                            'logEnviron': self.logEnviron,})
+        # first, perform a stat to ensure that this is really an svn directory
+        res = yield self.pathExists(self.build.path_module.join(self.workdir, '.svn'))
+        if not res:
+            defer.returnValue(False)
+            return
 
-        cmd.useLog(self.stdio_log, False)
-        d = self.runCommand(cmd)
-        def _fail(tmp):
-            if cmd.rc != 0:
-                return False
-            return True
-        d.addCallback(_fail)
-        return d
+        # then run 'svn info --xml' to check that the URL matches our repourl
+        stdout, stderr = yield self._dovccmd(['info', '--xml'], collectStdout=True, collectStderr=True, abandonOnFailure=False)
 
+        # svn: E155037: Previous operation has not finished; run 'cleanup' if it was interrupted
+        if 'E155037:' in stderr:
+            defer.returnValue(False)
+            return
+
+        try:
+            stdout_xml = xml.dom.minidom.parseString(stdout)
+            extractedurl = stdout_xml.getElementsByTagName('url')[0].firstChild.nodeValue
+        except xml.parsers.expat.ExpatError:
+            msg = "Corrupted xml, aborting step"
+            self.stdio_log.addHeader(msg)
+            raise buildstep.BuildStepFailed()
+        defer.returnValue(extractedurl == self.svnUriCanonicalize(self.repourl))
+        return
+
+    @defer.inlineCallbacks
     def parseGotRevision(self, _):
-        if self.outputdir:
-            cmd = buildstep.RemoteShellCommand(self.workdir, ['svnversion', self.outputdir],
-                                           env=self.env,
-                                           logEnviron=self.logEnviron,
-                                           collectStdout=True)
-        else:
-            cmd = buildstep.RemoteShellCommand(self.workdir, ['svnversion'],
-                                           env=self.env,
-                                           logEnviron=self.logEnviron,
-                                           collectStdout=True)
+        # if this was a full/export, then we need to check svnversion in the
+        # *source* directory, not the build directory
+        svnversion_dir = self.workdir
+        if self.mode == 'full' and self.method == 'export':
+            svnversion_dir = 'source'
+        cmd = remotecommand.RemoteShellCommand(svnversion_dir, ['svn', 'info', '--xml'],
+                                               env=self.env,
+                                               logEnviron=self.logEnviron,
+                                               timeout=self.timeout,
+                                               collectStdout=True)
         cmd.useLog(self.stdio_log, False)
-        d = self.runCommand(cmd)
-        def _setrev(_):
-            stdout = cmd.stdout.strip()
-            revision = stdout.rstrip('MSP')
-            revision = revision.split(':')[-1]
+        yield self.runCommand(cmd)
+
+        stdout = cmd.stdout
+        try:
+            stdout_xml = xml.dom.minidom.parseString(stdout)
+        except xml.parsers.expat.ExpatError:
+            msg = "Corrupted xml, aborting step"
+            self.stdio_log.addHeader(msg)
+            raise buildstep.BuildStepFailed()
+
+        revision = None
+        if self.preferLastChangedRev:
             try:
-                int(revision)
-            except ValueError:
-                msg =("SVN.parseGotRevision unable to parse output "
-                      "of svnversion: '%s'" % stdout)
+                revision = stdout_xml.getElementsByTagName('commit')[0].attributes['revision'].value
+            except (KeyError, IndexError):
+                msg = ("SVN.parseGotRevision unable to detect Last Changed Rev in"
+                       " output of svn info")
+                log.msg(msg)
+                # fall through and try to get 'Revision' instead
+
+        if revision is None:
+            try:
+                revision = stdout_xml.getElementsByTagName('entry')[0].attributes['revision'].value
+            except (KeyError, IndexError):
+                msg = ("SVN.parseGotRevision unable to detect revision in"
+                       " output of svn info")
                 log.msg(msg)
                 raise buildstep.BuildStepFailed()
 
-            log.msg("Got SVN revision %s" % (revision, ))
-            self.setProperty('got_revision', revision, 'Source')
-            return 0
-        d.addCallback(lambda _: _setrev(cmd.rc))
-        return d
+        msg = "Got SVN revision %s" % (revision, )
+        self.stdio_log.addHeader(msg)
+        self.updateSourceProperty('got_revision', revision)
+
+        defer.returnValue(cmd.rc)
 
     def purge(self, ignore_ignores):
         """Delete everything that shown up on status."""
@@ -351,34 +342,28 @@ class SVN(Source):
         if self.outputdir:
             command.append(self.outputdir)
         d = self._dovccmd(command, collectStdout=True)
+
+        @d.addCallback
         def parseAndRemove(stdout):
             files = []
             for filename in self.getUnversionedFiles(stdout, self.keep_on_purge):
-                if self.outputdir:
-                    filename = self.workdir+'/'+self.outputdir+'/'+str(filename)
-                else:
-                    filename = self.workdir+'/'+str(filename)
+                filename = self.workdir + '/' + str(filename)
                 files.append(filename)
             if len(files) == 0:
                 d = defer.succeed(0)
             else:
-                if not self.slaveVersionIsOlderThan('rmdir', '2.14'):
+                if self.slaveVersionIsOlderThan('rmdir', '2.14'):
                     d = self.removeFiles(files)
                 else:
-                    cmd = buildstep.LoggedRemoteCommand('rmdir', {'dir': files,
-                                                                  'logEnviron':
-                                                                  self.logEnviron,})
-                    cmd.useLog(self.stdio_log, False)
-                    d = self.runCommand(cmd)
-                    d.addCallback(lambda _: cmd.rc)
+                    d = self.runRmdir(files, abandonOnFailure=False)
             return d
-        d.addCallback(parseAndRemove)
+
+        @d.addCallback
         def evaluateCommand(rc):
             if rc != 0:
                 log.msg("Failed removing files")
                 raise buildstep.BuildStepFailed()
             return rc
-        d.addCallback(evaluateCommand)
         return d
 
     @staticmethod
@@ -400,31 +385,26 @@ class SVN(Source):
                 continue
             yield filename
 
-    @defer.deferredGenerator
+    @defer.inlineCallbacks
     def removeFiles(self, files):
         for filename in files:
-            cmd = buildstep.LoggedRemoteCommand('rmdir', {'dir': filename,
-                                                          'logEnviron': self.logEnviron,})
-            cmd.useLog(self.stdio_log, False)
-            wfd = defer.waitForDeferred(self.runCommand(cmd))
-            yield wfd
-            wfd.getResult()
-            if cmd.rc != 0:
-                yield cmd.rc
+            res = yield self.runRmdir(filename, abandonOnFailure=False)
+            if res:
+                defer.returnValue(res)
                 return
-        yield 0
+        defer.returnValue(0)
 
     def checkSvn(self):
-        cmd = buildstep.RemoteShellCommand(self.workdir, ['svn', '--version'],
-                                           env=self.env,
-                                           logEnviron=self.logEnviron)
+        cmd = remotecommand.RemoteShellCommand(self.workdir, ['svn', '--version'],
+                                               env=self.env,
+                                               logEnviron=self.logEnviron,
+                                               timeout=self.timeout)
         cmd.useLog(self.stdio_log, False)
         d = self.runCommand(cmd)
-        def evaluate(cmd):
-            if cmd.rc != 0:
-                return False
-            return True
-        d.addCallback(lambda _: evaluate(cmd))
+
+        @d.addCallback
+        def evaluate(_):
+            return cmd.rc == 0
         return d
 
     def computeSourceRevision(self, changes):
@@ -432,4 +412,78 @@ class SVN(Source):
             return None
         lastChange = max([int(c.revision) for c in changes])
         return lastChange
-    
+
+    @staticmethod
+    def svnUriCanonicalize(uri):
+        collapse = re.compile(r'([^/]+/\.\./?|/\./|//|/\.$|/\.\.$|^/\.\.)')
+        server_authority = re.compile(r'^(?:([^@]+)@)?([^:]+)(?::(.+))?$')
+        default_port = {'http': '80',
+                        'https': '443',
+                        'svn': '3690'}
+
+        relative_schemes = ['http', 'https', 'svn']
+        quote = lambda uri: urlquote(uri, "!$&'()*+,-./:=@_~")
+
+        if len(uri) == 0 or uri == '/':
+            return uri
+
+        (scheme, authority, path, parameters, query, fragment) = urlparse(uri)
+        scheme = lower(scheme)
+        if authority:
+            mo = server_authority.match(authority)
+            if not mo:
+                return uri  # give up
+            userinfo, host, port = mo.groups()
+            if host[-1] == '.':
+                host = host[:-1]
+            authority = lower(host)
+            if userinfo:
+                authority = "%s@%s" % (userinfo, authority)
+            if port and port != default_port.get(scheme, None):
+                authority = "%s:%s" % (authority, port)
+
+        if scheme in relative_schemes:
+            last_path = path
+            while True:
+                path = collapse.sub('/', path, 1)
+                if last_path == path:
+                    break
+                last_path = path
+
+        path = quote(urlunquote(path))
+        canonical_uri = urlunparse((scheme, authority, path, parameters, query, fragment))
+        if canonical_uri == '/':
+            return canonical_uri
+        elif canonical_uri[-1] == '/' and canonical_uri[-2] != '/':
+            return canonical_uri[:-1]
+        else:
+            return canonical_uri
+
+    def _checkout(self):
+        checkout_cmd = ['checkout', self.repourl, '.']
+        if self.revision:
+            checkout_cmd.extend(["--revision", str(self.revision)])
+        if self.retry:
+            abandonOnFailure = (self.retry[1] <= 0)
+        else:
+            abandonOnFailure = True
+        d = self._dovccmd(checkout_cmd, abandonOnFailure=abandonOnFailure)
+
+        def _retry(res):
+            if self.stopped or res == 0:
+                return res
+            delay, repeats = self.retry
+            if repeats > 0:
+                log.msg("Checkout failed, trying %d more times after %d seconds"
+                        % (repeats, delay))
+                self.retry = (delay, repeats - 1)
+                df = defer.Deferred()
+                df.addCallback(lambda _: self.runRmdir(self.workdir))
+                df.addCallback(lambda _: self._checkout())
+                reactor.callLater(delay, df.callback, None)
+                return df
+            return res
+
+        if self.retry:
+            d.addCallback(_retry)
+        return d

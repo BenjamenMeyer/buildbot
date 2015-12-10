@@ -17,31 +17,36 @@ from twisted.python import reflect
 
 commandRegistry = {
     # command name : fully qualified factory name (callable)
-    "shell" : "buildslave.commands.shell.SlaveShellCommand",
-    "uploadFile" : "buildslave.commands.transfer.SlaveFileUploadCommand",
-    "uploadDirectory" : "buildslave.commands.transfer.SlaveDirectoryUploadCommand",
-    "downloadFile" : "buildslave.commands.transfer.SlaveFileDownloadCommand",
-    "svn" : "buildslave.commands.svn.SVN",
-    "bk" : "buildslave.commands.bk.BK",
-    "cvs" : "buildslave.commands.cvs.CVS",
-    "darcs" : "buildslave.commands.darcs.Darcs",
-    "git" : "buildslave.commands.git.Git",
-    "repo" : "buildslave.commands.repo.Repo",
-    "bzr" : "buildslave.commands.bzr.Bzr",
-    "hg" : "buildslave.commands.hg.Mercurial",
-    "p4" : "buildslave.commands.p4.P4",
-    "p4sync" : "buildslave.commands.p4.P4Sync",
-    "mtn" : "buildslave.commands.mtn.Monotone",
-    "mkdir" : "buildslave.commands.fs.MakeDirectory",
-    "rmdir" : "buildslave.commands.fs.RemoveDirectory",
-    "cpdir" : "buildslave.commands.fs.CopyDirectory",
-    "stat" : "buildslave.commands.fs.StatFile",
+    "shell": "buildslave.commands.shell.SlaveShellCommand",
+    "uploadFile": "buildslave.commands.transfer.SlaveFileUploadCommand",
+    "uploadDirectory": "buildslave.commands.transfer.SlaveDirectoryUploadCommand",
+    "downloadFile": "buildslave.commands.transfer.SlaveFileDownloadCommand",
+    "repo": "buildslave.commands.repo.Repo",
+    "mkdir": "buildslave.commands.fs.MakeDirectory",
+    "rmdir": "buildslave.commands.fs.RemoveDirectory",
+    "cpdir": "buildslave.commands.fs.CopyDirectory",
+    "stat": "buildslave.commands.fs.StatFile",
+    "glob": "buildslave.commands.fs.GlobPath",
+    "listdir": "buildslave.commands.fs.ListDir",
+
+    # Commands that are no longer supported
+    "svn": "buildslave.commands.removed.Svn",
+    "bk": "buildslave.commands.removed.Bk",
+    "cvs": "buildslave.commands.removed.Cvs",
+    "darcs": "buildslave.commands.removed.Darcs",
+    "git": "buildslave.commands.removed.Git",
+    "bzr": "buildslave.commands.removed.Bzr",
+    "hg": "buildslave.commands.removed.Hg",
+    "p4": "buildslave.commands.removed.P4",
+    "mtn": "buildslave.commands.removed.Mtn",
 }
+
 
 def getFactory(command):
     factory_name = commandRegistry[command]
     factory = reflect.namedObject(factory_name)
     return factory
 
+
 def getAllCommandNames():
-    return commandRegistry.keys()
+    return list(commandRegistry)

@@ -14,52 +14,55 @@
 # Copyright Buildbot Team Members
 
 import mock
-from twisted.trial import unittest
-from twisted.internet import defer
+
+from buildbot import config
 from buildbot.process import debug
+from buildbot.test.fake import fakemaster
+from buildbot.util import service
+from twisted.internet import defer
+from twisted.trial import unittest
 
-class TestRegisterDebugClient(unittest.TestCase):
 
-    def test_registerDebugClient(self):
-        pbmanager = mock.Mock()
-        pbmanager.register.return_value = mock.Mock()
-        master = mock.Mock()
-        slavePortnum = 9824
-        debugPassword = 'seeeekrt'
+class FakeManhole(service.AsyncService):
+    pass
 
-        rv = debug.registerDebugClient(master, slavePortnum,
-                                       debugPassword, pbmanager)
 
-        # test return value and that the register method was called
-        self.assertIdentical(rv, pbmanager.register.return_value)
-        self.assertEqual(pbmanager.register.call_args[0][0], slavePortnum)
-        self.assertEqual(pbmanager.register.call_args[0][1], "debug")
-        self.assertEqual(pbmanager.register.call_args[0][2], debugPassword)
-
-        # test the lambda
-        mind = mock.Mock()
-        username = "hush"
-        dc = pbmanager.register.call_args[0][3](mind, username)
-        self.assertIsInstance(dc, debug.DebugPerspective)
-
-class TestDebugPerspective(unittest.TestCase):
+class TestDebugServices(unittest.TestCase):
 
     def setUp(self):
-        self.persp = debug.DebugPerspective()
-        self.master = self.persp.master = mock.Mock()
-        self.botmaster = self.persp.botmaster = mock.Mock()
+        self.master = mock.Mock(name='master')
+        self.config = config.MasterConfig()
 
-    def test_attached(self):
-        self.assertIdentical(self.persp.attached(mock.Mock()), self.persp)
+    @defer.inlineCallbacks
+    def test_reconfigService_manhole(self):
+        master = fakemaster.make_master()
+        ds = debug.DebugServices()
+        ds.setServiceParent(master)
+        yield master.startService()
 
-    def test_detached(self):
-        self.persp.detached(mock.Mock()) # just shouldn't crash
+        # start off with no manhole
+        yield ds.reconfigServiceWithBuildbotConfig(self.config)
 
-    def test_perspective_reload(self):
-        d = defer.maybeDeferred(lambda : self.persp.perspective_reload())
-        def check(_):
-            self.master.loadTheConfigFile.assert_called_with()
-        d.addCallback(check)
-        return d
+        # set a manhole, fire it up
+        self.config.manhole = manhole = FakeManhole()
+        yield ds.reconfigServiceWithBuildbotConfig(self.config)
 
-    # remaining methods require IControl adapters or other weird stuff.. TODO
+        self.assertTrue(manhole.running)
+        self.assertIdentical(manhole.master, master)
+
+        # unset it, see it stop
+        self.config.manhole = None
+        yield ds.reconfigServiceWithBuildbotConfig(self.config)
+
+        self.assertFalse(manhole.running)
+        self.assertIdentical(manhole.master, None)
+
+        # re-start to test stopService
+        self.config.manhole = manhole
+        yield ds.reconfigServiceWithBuildbotConfig(self.config)
+
+        # disown the service, and see that it unregisters
+        yield ds.disownServiceParent()
+
+        self.assertFalse(manhole.running)
+        self.assertIdentical(manhole.master, None)

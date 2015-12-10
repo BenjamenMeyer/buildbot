@@ -17,29 +17,52 @@
 Steps and objects related to rpmlint.
 """
 
+from buildbot.steps.package import util as pkgutil
 from buildbot.steps.shell import Test
 
 
 class RpmLint(Test):
+
     """
     Rpmlint build step.
     """
 
+    name = "rpmlint"
+
     description = ["Checking for RPM/SPEC issues"]
     descriptionDone = ["Finished checking RPM/SPEC issues"]
 
-    def __init__(self, fileloc="*rpm", **kwargs):
+    fileloc = '.'
+    config = None
+
+    def __init__(self,
+                 fileloc=None,
+                 config=None,
+                 **kwargs):
         """
         Create the Rpmlint object.
 
         @type fileloc: str
         @param fileloc: Location glob of the specs or rpms.
+        @type config: str
+        @param config: path to the rpmlint user config.
         @type kwargs: dict
         @param fileloc: all other keyword arguments.
         """
         Test.__init__(self, **kwargs)
-        self.command = ["/usr/bin/rpmlint", "-i"]
-        self.command.append(fileloc)
+        if fileloc:
+            self.fileloc = fileloc
+        if config:
+            self.config = config
+        self.addFactoryArguments(fileloc=fileloc, config=config)
+
+        self.command = ["rpmlint", "-i"]
+        if self.config:
+            self.command += ['-f', self.config]
+        self.command.append(self.fileloc)
+
+        self.obs = pkgutil.WEObserver()
+        self.addLogObserver('stdio', self.obs)
 
     def createSummary(self, log):
         """
@@ -47,12 +70,9 @@ class RpmLint(Test):
 
         @param log: log to create summary off of.
         """
-        warnings = []
+        warnings = self.obs.warnings
         errors = []
-        for line in log.readlines():
-            if ' W: ' in line:
-                warnings.append(line)
-            elif ' E: ' in line:
-                errors.append(line)
-        self.addCompleteLog('Rpmlint Warnings', "".join(warnings))
-        self.addCompleteLog('Rpmlint Errors', "".join(errors))
+        if warnings:
+            self.addCompleteLog('%d Warnings' % len(warnings), "".join(warnings))
+        if errors:
+            self.addCompleteLog('%d Errors' % len(errors), "".join(errors))

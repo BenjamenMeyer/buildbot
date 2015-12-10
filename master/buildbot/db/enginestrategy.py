@@ -23,21 +23,46 @@ special cases that Buildbot needs.  Those include:
 
 """
 
+import migrate
 import os
+import re
 import sqlalchemy as sa
+
+from buildbot.util import sautils
+from sqlalchemy.engine import strategies
+from sqlalchemy.engine import url
+from sqlalchemy.pool import NullPool
 from twisted.python import log
-from sqlalchemy.engine import strategies, url
-from sqlalchemy.pool import NullPool, Pool
 
 # from http://www.mail-archive.com/sqlalchemy@googlegroups.com/msg15079.html
+
+
 class ReconnectingListener(object):
+
     def __init__(self):
         self.retried = False
+
+
+def get_sqlalchemy_migrate_version():
+    # sqlalchemy-migrate started including a version number in 0.7
+    # Borrowed from model.py
+    version = getattr(migrate, '__version__', 'old')
+    if version == 'old':
+        try:
+            from migrate.versioning import schemadiff
+            if hasattr(schemadiff, 'ColDiff'):
+                version = "0.6.1"
+            else:
+                version = "0.6"
+        except Exception:
+            version = "0.0"
+    return tuple(map(int, version.split('.')))
+
 
 class BuildbotEngineStrategy(strategies.ThreadLocalEngineStrategy):
     # A subclass of the ThreadLocalEngineStrategy that can effectively interact
     # with Buildbot.
-    # 
+    #
     # This adjusts the passed-in parameters to ensure that we get the behaviors
     # Buildbot wants from particular drivers, and wraps the outgoing Engine
     # object so that its methods run in threads and return deferreds.
@@ -60,7 +85,7 @@ class BuildbotEngineStrategy(strategies.ThreadLocalEngineStrategy):
             # sqlalchemy 0.7 for non-memory SQLite databases.
             kwargs.setdefault('poolclass', NullPool)
 
-            u.database = u.database % dict(basedir = kwargs['basedir'])
+            u.database = u.database % dict(basedir=kwargs['basedir'])
             if not os.path.isabs(u.database[0]):
                 u.database = os.path.join(kwargs['basedir'], u.database)
 
@@ -80,10 +105,22 @@ class BuildbotEngineStrategy(strategies.ThreadLocalEngineStrategy):
         """Special setup for sqlite engines"""
         # try to enable WAL logging
         if u.database:
+            def connect_listener(connection, record):
+                connection.execute("pragma checkpoint_fullfsync = off")
+
+            if sautils.sa_version() < (0, 7, 0):
+                class CheckpointFullfsyncDisabler(object):
+                    pass
+                disabler = CheckpointFullfsyncDisabler()
+                disabler.connect = connect_listener
+                engine.pool.add_listener(disabler)
+            else:
+                sa.event.listen(engine.pool, 'connect', connect_listener)
+
             log.msg("setting database journal mode to 'wal'")
             try:
                 engine.execute("pragma journal_mode = wal")
-            except:
+            except Exception:
                 log.msg("failed to set journal mode - database may fail")
 
     def special_case_mysql(self, u, kwargs):
@@ -94,26 +131,30 @@ class BuildbotEngineStrategy(strategies.ThreadLocalEngineStrategy):
 
         kwargs['pool_recycle'] = int(u.query.pop('max_idle', 3600))
 
-        # default to the InnoDB storage engine
+        # default to the MyISAM storage engine; InnoDB is not supported
         storage_engine = u.query.pop('storage_engine', 'MyISAM')
         kwargs['connect_args'] = {
-            'init_command' : 'SET storage_engine=%s' % storage_engine,
+            'init_command': 'SET storage_engine=%s' % storage_engine,
         }
 
         if 'use_unicode' in u.query:
             if u.query['use_unicode'] != "True":
                 raise TypeError("Buildbot requires use_unicode=True " +
-                                 "(and adds it automatically)")
+                                "(and adds it automatically)")
         else:
             u.query['use_unicode'] = True
 
         if 'charset' in u.query:
             if u.query['charset'] != "utf8":
                 raise TypeError("Buildbot requires charset=utf8 " +
-                                 "(and adds it automatically)")
+                                "(and adds it automatically)")
         else:
             u.query['charset'] = 'utf8'
 
+        return u, kwargs, None
+
+    def set_up_mysql_engine(self, u, engine):
+        """Special setup for mysql engines"""
         # add the reconnecting PoolListener that will detect a
         # disconnected connection and automatically start a new
         # one.  This provides a measure of additional safety over
@@ -123,7 +164,7 @@ class BuildbotEngineStrategy(strategies.ThreadLocalEngineStrategy):
             try:
                 cursor = dbapi_con.cursor()
                 cursor.execute("SELECT 1")
-            except dbapi_con.OperationalError, ex:
+            except dbapi_con.OperationalError as ex:
                 if ex.args[0] in (2006, 2013, 2014, 2045, 2055):
                     # sqlalchemy will re-create the connection
                     raise sa.exc.DisconnectionError()
@@ -131,20 +172,35 @@ class BuildbotEngineStrategy(strategies.ThreadLocalEngineStrategy):
 
         # older versions of sqlalchemy require the listener to be specified
         # in the kwargs, in a class instance
-        if hasattr(sa, '__version__') and sa.__version__.startswith('0.6'):
+        if sautils.sa_version() < (0, 7, 0):
             class ReconnectingListener(object):
                 pass
             rcl = ReconnectingListener()
             rcl.checkout = checkout_listener
-            kwargs['listeners'] = [ rcl ]
+            engine.pool.add_listener(rcl)
         else:
-            sa.event.listen(Pool, 'checkout', checkout_listener)
+            sa.event.listen(engine.pool, 'checkout', checkout_listener)
 
-        return u, kwargs, None
+    def check_sqlalchemy_version(self):
+        version = getattr(sa, '__version__', '0')
+        try:
+            version_digits = re.sub('[^0-9.]', '', version)
+            version_tup = tuple(map(int, version_digits.split('.')))
+        except TypeError:
+            pass
+
+        if version_tup < (0, 6):
+            raise RuntimeError("SQLAlchemy version %s is too old" % (version,))
+        if version_tup > (0, 7, 10):
+            mvt = get_sqlalchemy_migrate_version()
+            if mvt < (0, 8, 0):
+                raise RuntimeError("SQLAlchemy version %s is not supported by "
+                                   "SQLAlchemy-Migrate version %d.%d.%d" % (version, mvt[0], mvt[1], mvt[2]))
 
     def create(self, name_or_url, **kwargs):
         if 'basedir' not in kwargs:
             raise TypeError('no basedir supplied to create_engine')
+        self.check_sqlalchemy_version()
 
         max_conns = None
 
@@ -164,7 +220,7 @@ class BuildbotEngineStrategy(strategies.ThreadLocalEngineStrategy):
             max_conns = kwargs.get('pool_size', 5) + kwargs.get('max_overflow', 10)
 
         engine = strategies.ThreadLocalEngineStrategy.create(self,
-                                            u, **kwargs)
+                                                             u, **kwargs)
 
         # annotate the engine with the optimal thread pool size; this is used
         # by DBConnector to configure the surrounding thread pool
@@ -175,6 +231,8 @@ class BuildbotEngineStrategy(strategies.ThreadLocalEngineStrategy):
 
         if u.drivername.startswith('sqlite'):
             self.set_up_sqlite_engine(u, engine)
+        elif u.drivername.startswith('mysql'):
+            self.set_up_mysql_engine(u, engine)
 
         return engine
 
@@ -183,6 +241,8 @@ BuildbotEngineStrategy()
 # this module is really imported for the side-effects, but pyflakes will like
 # us to use something from the module -- so offer a copy of create_engine,
 # which explicitly adds the strategy argument
+
+
 def create_engine(*args, **kwargs):
     kwargs['strategy'] = 'buildbot'
 

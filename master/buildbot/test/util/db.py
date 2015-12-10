@@ -14,11 +14,16 @@
 # Copyright Buildbot Team Members
 
 import os
+import sqlalchemy as sa
+
+from buildbot.db import enginestrategy
+from buildbot.db import model
+from buildbot.db import pool
 from sqlalchemy.schema import MetaData
+from twisted.internet import defer
 from twisted.python import log
 from twisted.trial import unittest
-from twisted.internet import defer
-from buildbot.db import model, pool, enginestrategy
+
 
 def skip_for_dialect(dialect):
     """Decorator to skip a test for a particular SQLAlchemy dialect."""
@@ -26,12 +31,14 @@ def skip_for_dialect(dialect):
         def wrap(self, *args, **kwargs):
             if self.db_engine.dialect.name == dialect:
                 raise unittest.SkipTest(
-                        "Not supported on dialect '%s'" % dialect)
+                    "Not supported on dialect '%s'" % dialect)
             return fn(self, *args, **kwargs)
         return wrap
     return dec
 
+
 class RealDatabaseMixin(object):
+
     """
     A class that sets up a real database for testing.  This sets self.db_url to
     the URL for the database.  By default, it specifies an in-memory SQLite
@@ -58,24 +65,38 @@ class RealDatabaseMixin(object):
     #  - cooperates better at runtime with thread-sensitive DBAPI's
 
     def __thd_clean_database(self, conn):
-        # drop the known tables
-        model.Model.metadata.drop_all(bind=conn, checkfirst=True)
+        # drop the known tables, although sometimes this misses dependencies
+        try:
+            model.Model.metadata.drop_all(bind=conn, checkfirst=True)
+        except sa.exc.ProgrammingError:
+            pass
 
         # see if we can find any other tables to drop
-        meta = MetaData(bind=conn)
-        meta.reflect()
-        meta.drop_all()
+        try:
+            meta = MetaData(bind=conn)
+            meta.reflect()
+            meta.drop_all()
+        except Exception:
+            # sometimes this goes badly wrong; being able to see the schema
+            # can be a big help
+            if conn.engine.dialect.name == 'sqlite':
+                r = conn.execute("select sql from sqlite_master "
+                                 "where type='table'")
+                log.msg("Current schema:")
+                for row in r.fetchall():
+                    log.msg(row.sql)
+            raise
 
     def __thd_create_tables(self, conn, table_names):
         all_table_names = set(table_names)
-        ordered_tables = [ t for t in model.Model.metadata.sorted_tables
-                        if t.name in all_table_names ]
+        ordered_tables = [t for t in model.Model.metadata.sorted_tables
+                          if t.name in all_table_names]
 
         for tbl in ordered_tables:
             tbl.create(bind=conn, checkfirst=True)
 
     def setUpRealDatabase(self, table_names=[], basedir='basedir',
-                          want_pool=True):
+                          want_pool=True, sqlite_memory=True):
         """
 
         Set up a database.  Ordinarily sets up an engine and a pool and takes
@@ -86,17 +107,21 @@ class RealDatabaseMixin(object):
         @param table_names: list of names of tables to instantiate
         @param basedir: (optional) basedir for the engine
         @param want_pool: (optional) false to not create C{self.db_pool}
+        @param sqlite_memory: (optional) False to avoid using an in-memory db
         @returns: Deferred
         """
         self.__want_pool = want_pool
 
-        memory = 'sqlite://'
-        self.db_url = os.environ.get('BUILDBOT_TEST_DB_URL', memory)
-        self.__using_memory_db = (self.db_url == memory)
+        default = 'sqlite://'
+        if not sqlite_memory:
+            default = "sqlite:///tmp.sqlite"
+            if not os.path.exists(basedir):
+                os.makedirs(basedir)
 
+        self.db_url = os.environ.get('BUILDBOT_TEST_DB_URL', default)
+        self.basedir = basedir
         self.db_engine = enginestrategy.create_engine(self.db_url,
-                                                    basedir=basedir)
-
+                                                      basedir=basedir)
         # if the caller does not want a pool, we're done.
         if not want_pool:
             return defer.succeed(None)
@@ -105,8 +130,8 @@ class RealDatabaseMixin(object):
 
         log.msg("cleaning database %s" % self.db_url)
         d = self.db_pool.do(self.__thd_clean_database)
-        d.addCallback(lambda _ :
-                self.db_pool.do(self.__thd_create_tables, table_names))
+        d.addCallback(lambda _:
+                      self.db_pool.do(self.__thd_create_tables, table_names))
         return d
 
     def tearDownRealDatabase(self):
@@ -124,18 +149,18 @@ class RealDatabaseMixin(object):
         @returns: Deferred
         """
         # sort the tables by dependency
-        all_table_names = set([ row.table for row in rows ])
-        ordered_tables = [ t for t in model.Model.metadata.sorted_tables
-                           if t.name in all_table_names ]
+        all_table_names = set([row.table for row in rows])
+        ordered_tables = [t for t in model.Model.metadata.sorted_tables
+                          if t.name in all_table_names]
+
         def thd(conn):
             # insert into tables -- in order
             for tbl in ordered_tables:
-                for row in [ r for r in rows if r.table == tbl.name ]:
+                for row in [r for r in rows if r.table == tbl.name]:
                     tbl = model.Model.metadata.tables[row.table]
                     try:
                         tbl.insert(bind=conn).execute(row.values)
-                    except:
+                    except Exception:
                         log.msg("while inserting %s - %s" % (row, row.values))
                         raise
         return self.db_pool.do(thd)
-

@@ -12,97 +12,167 @@
 # Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
 # Copyright Buildbot Team Members
+from future.utils import iteritems
 
 import sqlalchemy as sa
 import sqlalchemy.exc
+
+from buildbot.db import NULL
 from buildbot.db import base
+from twisted.internet import defer
+
+
+class SchedulerAlreadyClaimedError(Exception):
+    pass
+
 
 class SchedulersConnectorComponent(base.DBConnectorComponent):
-    # Documentation is in developer/database.rst
+    # Documentation is in developer/db.rst
 
     def classifyChanges(self, schedulerid, classifications):
         def thd(conn):
             tbl = self.db.model.scheduler_changes
             ins_q = tbl.insert()
             upd_q = tbl.update(
-                    ((tbl.c.schedulerid == schedulerid)
-                    & (tbl.c.changeid == sa.bindparam('wc_changeid'))))
-            for changeid, important in classifications.items():
+                ((tbl.c.schedulerid == schedulerid)
+                 & (tbl.c.changeid == sa.bindparam('wc_changeid'))))
+            for changeid, important in iteritems(classifications):
+                transaction = conn.begin()
                 # convert the 'important' value into an integer, since that
                 # is the column type
                 imp_int = important and 1 or 0
                 try:
                     conn.execute(ins_q,
-                            schedulerid=schedulerid,
-                            changeid=changeid,
-                            important=imp_int)
+                                 schedulerid=schedulerid,
+                                 changeid=changeid,
+                                 important=imp_int)
                 except (sqlalchemy.exc.ProgrammingError,
                         sqlalchemy.exc.IntegrityError):
+                    transaction.rollback()
+                    transaction = conn.begin()
                     # insert failed, so try an update
                     conn.execute(upd_q,
-                            wc_changeid=changeid,
-                            important=imp_int)
+                                 wc_changeid=changeid,
+                                 important=imp_int)
 
+                transaction.commit()
         return self.db.pool.do(thd)
 
     def flushChangeClassifications(self, schedulerid, less_than=None):
         def thd(conn):
-            scheduler_changes_tbl = self.db.model.scheduler_changes
-            wc = (scheduler_changes_tbl.c.schedulerid == schedulerid)
+            sch_ch_tbl = self.db.model.scheduler_changes
+            wc = (sch_ch_tbl.c.schedulerid == schedulerid)
             if less_than is not None:
-                wc = wc & (scheduler_changes_tbl.c.changeid < less_than)
-            q = scheduler_changes_tbl.delete(whereclause=wc)
+                wc = wc & (sch_ch_tbl.c.changeid < less_than)
+            q = sch_ch_tbl.delete(whereclause=wc)
             conn.execute(q)
         return self.db.pool.do(thd)
 
-    class Thunk: pass
-    def getChangeClassifications(self, schedulerid, branch=Thunk):
+    def getChangeClassifications(self, schedulerid, branch=-1,
+                                 repository=-1, project=-1,
+                                 codebase=-1):
+        # -1 here stands for "argument not given", since None has meaning
+        # as a branch
         def thd(conn):
-            scheduler_changes_tbl = self.db.model.scheduler_changes
-            changes_tbl = self.db.model.changes
+            sch_ch_tbl = self.db.model.scheduler_changes
+            ch_tbl = self.db.model.changes
 
-            wc = (scheduler_changes_tbl.c.schedulerid == schedulerid)
-            if branch is not self.Thunk:
-                wc = wc & (
-                    (scheduler_changes_tbl.c.changeid == changes_tbl.c.changeid) &
-                    (changes_tbl.c.branch == branch))
+            wc = (sch_ch_tbl.c.schedulerid == schedulerid)
+
+            # may need to filter further based on branch, etc
+            extra_wheres = []
+            if branch != -1:
+                extra_wheres.append(ch_tbl.c.branch == branch)
+            if repository != -1:
+                extra_wheres.append(ch_tbl.c.repository == repository)
+            if project != -1:
+                extra_wheres.append(ch_tbl.c.project == project)
+            if codebase != -1:
+                extra_wheres.append(ch_tbl.c.codebase == codebase)
+
+            # if we need to filter further append those, as well as a join
+            # on changeid (but just once for that one)
+            if extra_wheres:
+                wc &= (sch_ch_tbl.c.changeid == ch_tbl.c.changeid)
+                for w in extra_wheres:
+                    wc &= w
+
             q = sa.select(
-                [ scheduler_changes_tbl.c.changeid, scheduler_changes_tbl.c.important ],
+                [sch_ch_tbl.c.changeid, sch_ch_tbl.c.important],
                 whereclause=wc)
-            return dict([ (r.changeid, [False,True][r.important]) for r in conn.execute(q) ])
+            return dict([(r.changeid, [False, True][r.important])
+                         for r in conn.execute(q)])
         return self.db.pool.do(thd)
 
-    def getSchedulerId(self, sched_name, sched_class):
+    def findSchedulerId(self, name):
+        tbl = self.db.model.schedulers
+        name_hash = self.hashColumns(name)
+        return self.findSomethingId(
+            tbl=tbl,
+            whereclause=(tbl.c.name_hash == name_hash),
+            insert_values=dict(
+                name=name,
+                name_hash=name_hash,
+            ))
+
+    def setSchedulerMaster(self, schedulerid, masterid):
         def thd(conn):
-            # get a matching row, *or* one without a class_name (from 0.8.0)
-            schedulers_tbl = self.db.model.schedulers
-            q = schedulers_tbl.select(
-                    whereclause=(
-                        (schedulers_tbl.c.name == sched_name) &
-                        ((schedulers_tbl.c.class_name == sched_class) |
-                         (schedulers_tbl.c.class_name == ''))))
-            res = conn.execute(q)
-            row = res.fetchone()
-            res.close()
+            sch_mst_tbl = self.db.model.scheduler_masters
 
-            # if no existing row, then insert a new one and return it.  There
-            # is no protection against races here, but that's OK - the worst
-            # that happens is two sourcestamps with identical content; before
-            # 0.8.4 this was always the case.
-            if not row:
-                q = schedulers_tbl.insert()
-                res = conn.execute(q,
-                        name=sched_name,
-                        class_name=sched_class,
-                        state='{}')
-                return res.inserted_primary_key[0]
+            # handle the masterid=None case to get it out of the way
+            if masterid is None:
+                q = sch_mst_tbl.delete(
+                    whereclause=(sch_mst_tbl.c.schedulerid == schedulerid))
+                conn.execute(q)
+                return
 
-            # upgrade the row with the class name, if necessary
-            if row.class_name == '':
-                q = schedulers_tbl.update(
-                    whereclause=(
-                        (schedulers_tbl.c.name == sched_name) &
-                        (schedulers_tbl.c.class_name == '')))
-                conn.execute(q, class_name=sched_class)
-            return row.schedulerid
+            # try a blind insert..
+            try:
+                q = sch_mst_tbl.insert()
+                conn.execute(q,
+                             dict(schedulerid=schedulerid, masterid=masterid))
+            except (sa.exc.IntegrityError, sa.exc.ProgrammingError):
+                # someone already owns this scheduler.
+                raise SchedulerAlreadyClaimedError
+
+        return self.db.pool.do(thd)
+
+    @defer.inlineCallbacks
+    def getScheduler(self, schedulerid):
+        sch = yield self.getSchedulers(_schedulerid=schedulerid)
+        if sch:
+            defer.returnValue(sch[0])
+
+    def getSchedulers(self, active=None, masterid=None, _schedulerid=None):
+        def thd(conn):
+            sch_tbl = self.db.model.schedulers
+            sch_mst_tbl = self.db.model.scheduler_masters
+
+            # handle the trivial case of masterid=xx and active=False
+            if masterid is not None and active is not None and not active:
+                return []
+
+            join = sch_tbl.outerjoin(sch_mst_tbl,
+                                     (sch_tbl.c.id == sch_mst_tbl.c.schedulerid))
+
+            # if we're given a _schedulerid, select only that row
+            wc = None
+            if _schedulerid:
+                wc = (sch_tbl.c.id == _schedulerid)
+            else:
+                # otherwise, filter with active, if necessary
+                if masterid is not None:
+                    wc = (sch_mst_tbl.c.masterid == masterid)
+                elif active:
+                    wc = (sch_mst_tbl.c.masterid != NULL)
+                elif active is not None:
+                    wc = (sch_mst_tbl.c.masterid == NULL)
+
+            q = sa.select([sch_tbl.c.id, sch_tbl.c.name,
+                           sch_mst_tbl.c.masterid],
+                          from_obj=join, whereclause=wc)
+
+            return [dict(id=row.id, name=row.name,
+                         masterid=row.masterid)
+                    for row in conn.execute(q).fetchall()]
         return self.db.pool.do(thd)

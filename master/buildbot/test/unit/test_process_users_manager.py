@@ -14,28 +14,43 @@
 # Copyright Buildbot Team Members
 
 import mock
+
+from buildbot import config
+from buildbot.process.users import manager
+from buildbot.util import service
+from twisted.internet import defer
 from twisted.trial import unittest
-from buildbot.process.users import manager, manual
+
+
+class FakeUserManager(service.AsyncMultiService):
+    pass
+
 
 class TestUserManager(unittest.TestCase):
+
     def setUp(self):
         self.master = mock.Mock()
-        self.um = manager.UserManager()
-        self.um.parent = self.master
-        self.um.startService()
+        self.umm = manager.UserManagerManager(self.master)
+        self.umm.startService()
+
+        self.config = config.MasterConfig()
 
     def tearDown(self):
-        self.um.stopService()
+        self.umm.stopService()
 
-    def test_addManualComponent_removeManualComponent(self):
-        class ManualUsers(manual.UsersBase):
-            pass
+    @defer.inlineCallbacks
+    def test_reconfigServiceWithBuildbotConfig(self):
+        # add a user manager
+        um1 = FakeUserManager()
+        self.config.user_managers = [um1]
 
-        mu = ManualUsers()
-        self.um.addManualComponent(mu)
-        assert mu.master is self.um.parent
+        yield self.umm.reconfigServiceWithBuildbotConfig(self.config)
 
-        d = self.um.removeManualComponent(mu)
-        def check(_):
-            assert mu.master in None
-        return d
+        self.assertTrue(um1.running)
+        self.assertIdentical(um1.master, self.master)
+
+        # and back to nothing
+        self.config.user_managers = []
+        yield self.umm.reconfigServiceWithBuildbotConfig(self.config)
+
+        self.assertIdentical(um1.master, None)

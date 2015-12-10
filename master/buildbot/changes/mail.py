@@ -16,21 +16,27 @@
 """
 Parse various kinds of 'CVS notify' email.
 """
-import re
-import time, calendar
+import calendar
 import datetime
-from email import message_from_file
-from email.Utils import parseaddr, parsedate_tz, mktime_tz
-from email.Iterators import body_line_iterator
+import re
+import time
 
-from zope.interface import implements
-from twisted.python import log
-from twisted.internet import defer
+from email import message_from_file
+from email.iterators import body_line_iterator
+from email.utils import mktime_tz
+from email.utils import parseaddr
+from email.utils import parsedate_tz
+
 from buildbot import util
 from buildbot.interfaces import IChangeSource
 from buildbot.util.maildir import MaildirService
+from twisted.internet import defer
+from twisted.python import log
+from zope.interface import implements
+
 
 class MaildirSource(MaildirService, util.ComparableMixin):
+
     """Generic base class for Maildir-based change sources"""
     implements(IChangeSource)
 
@@ -50,20 +56,22 @@ class MaildirSource(MaildirService, util.ComparableMixin):
 
     def messageReceived(self, filename):
         d = defer.succeed(None)
+
+        @d.addCallback
         def parse_file(_):
             f = self.moveToCurDir(filename)
             return self.parse_file(f, self.prefix)
-        d.addCallback(parse_file)
 
+        @d.addCallback
         def add_change(chtuple):
             src, chdict = None, None
             if chtuple:
                 src, chdict = chtuple
             if chdict:
-                return self.master.addChange(src=src, **chdict)
+                return self.master.data.updates.addChange(src=unicode(src),
+                                                          **chdict)
             else:
                 log.msg("no change found in maildir file '%s'" % filename)
-        d.addCallback(add_change)
 
         return d
 
@@ -71,18 +79,17 @@ class MaildirSource(MaildirService, util.ComparableMixin):
         m = message_from_file(fd)
         return self.parse(m, prefix)
 
+
 class CVSMaildirSource(MaildirSource):
     name = "CVSMaildirSource"
 
     def __init__(self, maildir, prefix=None, category='',
-                 repository='', urlmaker=None, properties={}):
-        """If urlmaker is defined, it will be called with three arguments:
-        filename, previous version, new version. It returns a url for that
-        file."""
+                 repository='', properties=None):
         MaildirSource.__init__(self, maildir, prefix, category, repository)
-        self.urlmaker = urlmaker
+        if properties is None:
+            properties = {}
         self.properties = properties
-        
+
     def parse(self, m, prefix=None):
         """Parse messages sent by the 'buildbot-cvs-mail' program.
         """
@@ -92,40 +99,41 @@ class CVSMaildirSource(MaildirSource):
         # model)
         name, addr = parseaddr(m["from"])
         if not addr:
-            return None # no From means this message isn't from buildbot-cvs-mail
+            return None  # no From means this message isn't from buildbot-cvs-mail
         at = addr.find("@")
         if at == -1:
-            who = addr # might still be useful
+            author = addr  # might still be useful
         else:
-            who = addr[:at]
+            author = addr[:at]
+        author = util.ascii2unicode(author)
 
-        # CVS accecpts RFC822 dates. buildbot-cvs-mail adds the date as
+        # CVS accepts RFC822 dates. buildbot-cvs-mail adds the date as
         # part of the mail header, so use that.
         # This assumes cvs is being access via ssh or pserver, so the time
         # will be the CVS server's time.
-        
+
         # calculate a "revision" based on that timestamp, or the current time
         # if we're unable to parse the date.
         log.msg('Processing CVS mail')
         dateTuple = parsedate_tz(m["date"])
-        if dateTuple == None:
+        if dateTuple is None:
             when = util.now()
         else:
             when = mktime_tz(dateTuple)
-            
-        theTime =  datetime.datetime.utcfromtimestamp(float(when))
+
+        theTime = datetime.datetime.utcfromtimestamp(float(when))
         rev = theTime.strftime('%Y-%m-%d %H:%M:%S')
 
-        catRE           = re.compile( '^Category:\s*(\S.*)')
-        cvsRE           = re.compile( '^CVSROOT:\s*(\S.*)')
-        cvsmodeRE       = re.compile( '^Cvsmode:\s*(\S.*)')
-        filesRE         = re.compile( '^Files:\s*(\S.*)')
-        modRE           = re.compile( '^Module:\s*(\S.*)')
-        pathRE          = re.compile( '^Path:\s*(\S.*)')
-        projRE          = re.compile( '^Project:\s*(\S.*)')
-        singleFileRE    = re.compile( '(.*) (NONE|\d(\.|\d)+) (NONE|\d(\.|\d)+)')
-        tagRE           = re.compile( '^\s+Tag:\s*(\S.*)')
-        updateRE        = re.compile( '^Update of:\s*(\S.*)')
+        catRE = re.compile(r'^Category:\s*(\S.*)')
+        cvsRE = re.compile(r'^CVSROOT:\s*(\S.*)')
+        cvsmodeRE = re.compile(r'^Cvsmode:\s*(\S.*)')
+        filesRE = re.compile(r'^Files:\s*(\S.*)')
+        modRE = re.compile(r'^Module:\s*(\S.*)')
+        pathRE = re.compile(r'^Path:\s*(\S.*)')
+        projRE = re.compile(r'^Project:\s*(\S.*)')
+        singleFileRE = re.compile(r'(.*) (NONE|\d(\.|\d)+) (NONE|\d(\.|\d)+)')
+        tagRE = re.compile(r'^\s+Tag:\s*(\S.*)')
+        updateRE = re.compile(r'^Update of:\s*(\S.*)')
         comments = ""
         branch = None
         cvsroot = None
@@ -157,7 +165,7 @@ class CVSMaildirSource(MaildirSource):
             m = modRE.match(line)
             if m:
                 # We don't actually use this
-                #module = m.group(1)
+                # module = m.group(1)
                 continue
             m = pathRE.match(line)
             if m:
@@ -174,7 +182,7 @@ class CVSMaildirSource(MaildirSource):
             m = updateRE.match(line)
             if m:
                 # We don't actually use this
-                #updateof = m.group(1)
+                # updateof = m.group(1)
                 continue
             if line == "Log Message:\n":
                 break
@@ -183,7 +191,7 @@ class CVSMaildirSource(MaildirSource):
         #   repo/path file,old-version,new-version file2,old-version,new-version
         # Version 1.12 lists files as:
         #   file1 old-version new-version file2 old-version new-version
-        # 
+        #
         # files consists of tuples of 'file-name old-version new-version'
         # The versions are either dotted-decimal version numbers, ie 1.1
         # or NONE. New files are of the form 'NONE NUMBER', while removed
@@ -195,14 +203,14 @@ class CVSMaildirSource(MaildirSource):
         #  my_module new_file.c,NONE,1.1
         #  my_module removed.txt,1.2,NONE
         #  my_module modified_file.c,1.1,1.2
-        # While cvs version 1.12 gives us       
+        # While cvs version 1.12 gives us
         #  new_file.c NONE 1.1
         #  removed.txt 1.2 NONE
         #  modified_file.c 1.1,1.2
 
         if fileList is None:
-           log.msg('CVSMaildirSource Mail with no files. Ignoring')
-           return None       # We don't have any files. Email not from CVS
+            log.msg('CVSMaildirSource Mail with no files. Ignoring')
+            return None       # We don't have any files. Email not from CVS
 
         if cvsmode == '1.11':
             # Please, no repo paths with spaces!
@@ -213,42 +221,37 @@ class CVSMaildirSource(MaildirSource):
                 log.msg('CVSMaildirSource can\'t get path from file list. Ignoring mail')
                 return
             fileList = fileList[len(path):].strip()
-            singleFileRE = re.compile( '(.+?),(NONE|(?:\d+\.(?:\d+\.\d+\.)*\d+)),(NONE|(?:\d+\.(?:\d+\.\d+\.)*\d+))(?: |$)')
+            singleFileRE = re.compile(r'(.+?),(NONE|(?:\d+\.(?:\d+\.\d+\.)*\d+)),(NONE|(?:\d+\.(?:\d+\.\d+\.)*\d+))(?: |$)')
         elif cvsmode == '1.12':
-            singleFileRE = re.compile( '(.+?) (NONE|(?:\d+\.(?:\d+\.\d+\.)*\d+)) (NONE|(?:\d+\.(?:\d+\.\d+\.)*\d+))(?: |$)')
+            singleFileRE = re.compile(r'(.+?) (NONE|(?:\d+\.(?:\d+\.\d+\.)*\d+)) (NONE|(?:\d+\.(?:\d+\.\d+\.)*\d+))(?: |$)')
             if path is None:
                 raise ValueError('CVSMaildirSource cvs 1.12 require path. Check cvs loginfo config')
         else:
             raise ValueError('Expected cvsmode 1.11 or 1.12. got: %s' % cvsmode)
-        
+
         log.msg("CVSMaildirSource processing filelist: %s" % fileList)
-        links = []
         while(fileList):
             m = singleFileRE.match(fileList)
             if m:
                 curFile = path + '/' + m.group(1)
-                oldRev = m.group(2)
-                newRev = m.group(3)
-                files.append( curFile )
-                if self.urlmaker:
-                    links.append(self.urlmaker(curFile, oldRev, newRev ))
+                files.append(curFile)
                 fileList = fileList[m.end():]
             else:
                 log.msg('CVSMaildirSource no files matched regex. Ignoring')
                 return None   # bail - we couldn't parse the files that changed
-        # Now get comments    
+        # Now get comments
         while lines:
             line = lines.pop(0)
             comments += line
-            
+
         comments = comments.rstrip() + "\n"
         if comments == '\n':
             comments = None
-        return ('cvs', dict(who=who, files=files, comments=comments,
+        return ('cvs', dict(author=author, files=files, comments=comments,
                             isdir=isdir, when=when, branch=branch,
                             revision=rev, category=category,
                             repository=cvsroot, project=project,
-                            links=links, properties=self.properties))
+                            properties=self.properties))
 
 # svn "commit-email.pl" handler.  The format is very similar to freshcvs mail;
 # here's a sample:
@@ -275,6 +278,7 @@ class CVSMaildirSource(MaildirSource):
 #
 #  [end of mail]
 
+
 class SVNCommitEmailMaildirSource(MaildirSource):
     name = "SVN commit-email.pl"
 
@@ -288,12 +292,12 @@ class SVNCommitEmailMaildirSource(MaildirSource):
         # model)
         name, addr = parseaddr(m["from"])
         if not addr:
-            return None # no From means this message isn't from svn
+            return None  # no From means this message isn't from svn
         at = addr.find("@")
         if at == -1:
-            who = addr # might still be useful
+            author = addr  # might still be useful
         else:
-            who = addr[:at]
+            author = addr[:at]
 
         # we take the time of receipt as the time of checkin. Not correct (it
         # depends upon the email latency), but it avoids the
@@ -315,7 +319,7 @@ class SVNCommitEmailMaildirSource(MaildirSource):
             # "Author: jmason"
             match = re.search(r"^Author: (\S+)", line)
             if match:
-                who = match.group(1)
+                author = match.group(1)
 
             # "New Revision: 105955"
             match = re.search(r"^New Revision: (\d+)", line)
@@ -337,7 +341,7 @@ class SVNCommitEmailMaildirSource(MaildirSource):
             line = lines.pop(0)
             if (line == "Modified:\n" or
                 line == "Added:\n" or
-                line == "Removed:\n"):
+                    line == "Removed:\n"):
                 break
             comments += line
         comments = comments.rstrip() + "\n"
@@ -374,7 +378,7 @@ class SVNCommitEmailMaildirSource(MaildirSource):
             log.msg("no matching files found, ignoring commit")
             return None
 
-        return ('svn', dict(who=who, files=files, comments=comments,
+        return ('svn', dict(author=author, files=files, comments=comments,
                             when=when, revision=rev))
 
 # bzr Launchpad branch subscription mails. Sample mail:
@@ -383,7 +387,7 @@ class SVNCommitEmailMaildirSource(MaildirSource):
 #   Subject: [Branch ~knielsen/maria/tmp-buildbot-test] Rev 2701: test add file
 #   To: Joe <joe@acme.com>
 #   ...
-#   
+#
 #   ------------------------------------------------------------
 #   revno: 2701
 #   committer: Joe <joe@acme.com>
@@ -393,21 +397,22 @@ class SVNCommitEmailMaildirSource(MaildirSource):
 #     test add file
 #   added:
 #     test-add-file
-#   
-#   
+#
+#
 #   --
-#   
+#
 #   https://code.launchpad.net/~knielsen/maria/tmp-buildbot-test
-#   
+#
 #   You are subscribed to branch lp:~knielsen/maria/tmp-buildbot-test.
 #   To unsubscribe from this branch go to https://code.launchpad.net/~knielsen/maria/tmp-buildbot-test/+edit-subscription.
-# 
+#
 # [end of mail]
+
 
 class BzrLaunchpadEmailMaildirSource(MaildirSource):
     name = "Launchpad"
 
-    compare_attrs = MaildirSource.compare_attrs + ["branchMap", "defaultBranch"]
+    compare_attrs = ["branchMap", "defaultBranch"]
 
     def __init__(self, maildir, prefix=None, branchMap=None, defaultBranch=None, **kwargs):
         self.branchMap = branchMap
@@ -427,19 +432,24 @@ class BzrLaunchpadEmailMaildirSource(MaildirSource):
 
         # Put these into a dictionary, otherwise we cannot assign them
         # from nested function definitions.
-        d = { 'files': [], 'comments': "" }
+        d = {'files': [], 'comments': u""}
         gobbler = None
         rev = None
-        who = None
+        author = None
         when = util.now()
+
         def gobble_comment(s):
             d['comments'] += s + "\n"
+
         def gobble_removed(s):
             d['files'].append('%s REMOVED' % s)
+
         def gobble_added(s):
             d['files'].append('%s ADDED' % s)
+
         def gobble_modified(s):
             d['files'].append('%s MODIFIED' % s)
+
         def gobble_renamed(s):
             match = re.search(r"^(.+) => (.+)$", s)
             if match:
@@ -450,7 +460,7 @@ class BzrLaunchpadEmailMaildirSource(MaildirSource):
         lines = list(body_line_iterator(m, True))
         rev = None
         while lines:
-            line = lines.pop(0)
+            line = unicode(lines.pop(0), "utf-8", errors="ignore")
 
             # revno: 101
             match = re.search(r"^revno: ([0-9.]+)", line)
@@ -460,7 +470,7 @@ class BzrLaunchpadEmailMaildirSource(MaildirSource):
             # committer: Joe <joe@acme.com>
             match = re.search(r"^committer: (.*)$", line)
             if match:
-                who = match.group(1)
+                author = match.group(1)
 
             # timestamp: Fri 2009-05-15 10:35:43 +0200
             # datetime.strptime() is supposed to support %z for time zone, but
@@ -484,14 +494,14 @@ class BzrLaunchpadEmailMaildirSource(MaildirSource):
             elif re.search(r"^modified:\s*$", line):
                 gobbler = gobble_modified
             elif re.search(r"^  ", line) and gobbler:
-                gobbler(line[2:-1]) # Use :-1 to gobble trailing newline
+                gobbler(line[2:-1])  # Use :-1 to gobble trailing newline
 
         # Determine the name of the branch.
         branch = None
         if self.branchMap and repository:
-            if self.branchMap.has_key(repository):
+            if repository in self.branchMap:
                 branch = self.branchMap[repository]
-            elif self.branchMap.has_key('lp:' + repository):
+            elif ("lp:" + repository) in self.branchMap:
                 branch = self.branchMap['lp:' + repository]
         if not branch:
             if self.defaultBranch:
@@ -502,13 +512,14 @@ class BzrLaunchpadEmailMaildirSource(MaildirSource):
                 else:
                     branch = None
 
-        if rev and who:
-            return ('bzr', dict(who=who, files=d['files'],
+        if rev and author:
+            return ('bzr', dict(author=author, files=d['files'],
                                 comments=d['comments'],
                                 when=when, revision=rev,
                                 branch=branch, repository=repository or ''))
         else:
             return None
+
 
 def parseLaunchpadDate(datestr, tz_sign, tz_hours, tz_minutes):
     time_no_tz = calendar.timegm(time.strptime(datestr, "%Y-%m-%d %H:%M:%S"))

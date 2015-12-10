@@ -12,28 +12,34 @@
 # Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
 # Copyright Buildbot Team Members
-import gc, sys
-from mock import Mock
 
-from twisted.trial import unittest
-from twisted.internet import task
+import gc
+import sys
 
 from buildbot.process import metrics
+from buildbot.test.fake import fakemaster
+from twisted.internet import task
+from twisted.trial import unittest
+
 
 class TestMetricBase(unittest.TestCase):
+
     def setUp(self):
         self.clock = task.Clock()
-        self.observer = metrics.MetricLogObserver(dict(log_interval=0, periodic_interval=0))
-        self.observer.parent = Mock()
-        self.observer.parent.db_poll_interval = 60
+        self.observer = metrics.MetricLogObserver()
+        self.observer.parent = self.master = fakemaster.make_master()
+        self.master.config.metrics = dict(log_interval=0, periodic_interval=0)
         self.observer._reactor = self.clock
         self.observer.startService()
+        self.observer.reconfigServiceWithBuildbotConfig(self.master.config)
 
     def tearDown(self):
         if self.observer.running:
             self.observer.stopService()
 
+
 class TestMetricCountEvent(TestMetricBase):
+
     def testIncrement(self):
         metrics.MetricCountEvent.log('num_widgets', 1)
         report = self.observer.asDict()
@@ -67,7 +73,9 @@ class TestMetricCountEvent(TestMetricBase):
         report = self.observer.asDict()
         self.assertEquals(report['counters']['foo_called'], 10)
 
+
 class TestMetricTimeEvent(TestMetricBase):
+
     def testManualEvent(self):
         metrics.MetricTimeEvent.log('foo_time', 0.001)
         report = self.observer.asDict()
@@ -107,6 +115,7 @@ class TestMetricTimeEvent(TestMetricBase):
 
     def testTimeMethod(self):
         clock = task.Clock()
+
         @metrics.timeMethod('foo_time', _reactor=clock)
         def foo():
             clock.advance(5)
@@ -120,9 +129,11 @@ class TestMetricTimeEvent(TestMetricBase):
         for i in data:
             metrics.MetricTimeEvent.log('foo_time', i)
         report = self.observer.asDict()
-        self.assertEquals(report['timers']['foo_time'], sum(data)/float(len(data)))
+        self.assertEquals(report['timers']['foo_time'], sum(data) / float(len(data)))
+
 
 class TestPeriodicChecks(TestMetricBase):
+
     def testPeriodicCheck(self):
         # fake out that there's no garbage (since we can't rely on Python
         # not having any garbage while running tests)
@@ -140,7 +151,7 @@ class TestPeriodicChecks(TestMetricBase):
 
     def testUncollectable(self):
         # make some fake garbage
-        self.patch(gc, 'garbage', [ 1, 2 ])
+        self.patch(gc, 'garbage', [1, 2])
 
         clock = task.Clock()
         metrics.periodicCheck(_reactor=clock)
@@ -157,41 +168,65 @@ class TestPeriodicChecks(TestMetricBase):
     if sys.platform != 'linux2':
         testGetRSS.skip = "only available on linux2 platforms"
 
+
 class TestReconfig(TestMetricBase):
+
     def testReconfig(self):
         observer = self.observer
+        new_config = self.master.config
+
+        # starts up without running tasks
         self.assertEquals(observer.log_task, None)
         self.assertEquals(observer.periodic_task, None)
 
-        observer.reloadConfig(dict(log_interval=10, periodic_interval=0))
+        # enable log_interval
+        new_config.metrics = dict(log_interval=10, periodic_interval=0)
+        observer.reconfigServiceWithBuildbotConfig(new_config)
         self.assert_(observer.log_task)
         self.assertEquals(observer.periodic_task, None)
 
-        observer.reloadConfig(dict(log_interval=0, periodic_interval=10))
+        # disable that and enable periodic_interval
+        new_config.metrics = dict(periodic_interval=10, log_interval=0)
+        observer.reconfigServiceWithBuildbotConfig(new_config)
         self.assert_(observer.periodic_task)
         self.assertEquals(observer.log_task, None)
+
         # Make the periodic check run
         self.clock.pump([0.1])
 
-        observer.reloadConfig(dict(log_interval=0, periodic_interval=0))
+        # disable the whole listener
+        new_config.metrics = None
+        observer.reconfigServiceWithBuildbotConfig(new_config)
+        self.assertFalse(observer.enabled)
         self.assertEquals(observer.log_task, None)
         self.assertEquals(observer.periodic_task, None)
 
-        observer.reloadConfig(dict(log_interval=10, periodic_interval=10))
+        # disable both
+        new_config.metrics = dict(periodic_interval=0, log_interval=0)
+        observer.reconfigServiceWithBuildbotConfig(new_config)
+        self.assertEquals(observer.log_task, None)
+        self.assertEquals(observer.periodic_task, None)
+
+        # enable both
+        new_config.metrics = dict(periodic_interval=10, log_interval=10)
+        observer.reconfigServiceWithBuildbotConfig(new_config)
         self.assert_(observer.log_task)
         self.assert_(observer.periodic_task)
-        observer.stopService()
-        self.assertEquals(observer.log_task, None)
-        self.assertEquals(observer.periodic_task, None)
+
+        # (service will be stopped by tearDown)
+
 
 class _LogObserver:
+
     def __init__(self):
         self.events = []
 
     def gotEvent(self, event):
         self.events.append(event)
 
+
 class TestReports(unittest.TestCase):
+
     def testMetricCountReport(self):
         handler = metrics.MetricCountHandler(None)
         handler.handle({}, metrics.MetricCountEvent('num_foo', 1))

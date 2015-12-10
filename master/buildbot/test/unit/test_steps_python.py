@@ -13,7 +13,10 @@
 #
 # Copyright Buildbot Team Members
 
-from buildbot.status.results import FAILURE, SUCCESS, WARNINGS
+from buildbot import config
+from buildbot.process.results import FAILURE
+from buildbot.process.results import SUCCESS
+from buildbot.process.results import WARNINGS
 from buildbot.steps import python
 from buildbot.test.fake.remotecommand import ExpectShell
 from buildbot.test.util import steps
@@ -75,6 +78,57 @@ index.rst:: WARNING: toctree contains reference to document 'preamble' that \
 doesn't have a title: no link will be generated\
 '''
 
+# this is from a run of epydoc against the buildbot source..
+epydoc_output = '''\
+  [...............
++---------------------------------------------------------------------
+| In /home/dustin/code/buildbot/t/buildbot/master/buildbot/
+| ec2buildslave.py:
+| Import failed (but source code parsing was successful).
+|     Error: ImportError: No module named boto (line 19)
+|
+  [....
+Warning: Unable to extract the base list for
+         twisted.web.resource.EncodingResourceWrapper: Bad dotted name
+  [......
++---------------------------------------------------------------------
+| In /home/dustin/code/buildbot/t/buildbot/master/buildbot/buildslave/
+| ec2.py:
+| Import failed (but source code parsing was successful).
+|     Error: ImportError: No module named boto (line 28)
+|
+  [...........
++---------------------------------------------------------------------
+| In /home/dustin/code/buildbot/t/buildbot/master/buildbot/status/
+| status_push.py:
+| Import failed (but source code parsing was successful).
+|     Error: ImportError: No module named status_json (line 40)
+|
+  [....................<paragraph>Special descriptor for class __provides__</paragraph>
+'''
+
+
+class BuildEPYDoc(steps.BuildStepMixin, unittest.TestCase):
+
+    def setUp(self):
+        return self.setUpBuildStep()
+
+    def tearDown(self):
+        return self.tearDownBuildStep()
+
+    def test_sample(self):
+        self.setupStep(python.BuildEPYDoc())
+        self.expectCommands(
+            ExpectShell(workdir='wkdir', command=['make', 'epydocs'],
+                        usePTY='slave-config')
+            + ExpectShell.log('stdio',
+                              stdout=epydoc_output)
+            + 1,
+        )
+        self.expectOutcome(result=FAILURE,
+                           state_string='epydoc warn=1 err=3 (failure)')
+        return self.runStep()
+
 
 class PyLint(steps.BuildStepMixin, unittest.TestCase):
 
@@ -92,7 +146,7 @@ class PyLint(steps.BuildStepMixin, unittest.TestCase):
             + ExpectShell.log('stdio',
                               stdout='Your code has been rated at 10/10')
             + python.PyLint.RC_OK)
-        self.expectOutcome(result=SUCCESS, status_text=['pylint'])
+        self.expectOutcome(result=SUCCESS, state_string='pylint')
         return self.runStep()
 
     def test_error(self):
@@ -104,12 +158,23 @@ class PyLint(steps.BuildStepMixin, unittest.TestCase):
                 'stdio',
                 stdout=('W: 11: Bad indentation. Found 6 spaces, expected 4\n'
                         'E: 12: Undefined variable \'foo\'\n'))
-            + (python.PyLint.RC_WARNING|python.PyLint.RC_ERROR))
+            + (python.PyLint.RC_WARNING | python.PyLint.RC_ERROR))
         self.expectOutcome(result=FAILURE,
-                           status_text=['pylint', 'error=1', 'warning=1',
-                                        'failed'])
+                           state_string='pylint error=1 warning=1 (failure)')
         self.expectProperty('pylint-warning', 1)
         self.expectProperty('pylint-error', 1)
+        return self.runStep()
+
+    def test_header_output(self):
+        self.setupStep(python.PyLint(command=['pylint']))
+        self.expectCommands(
+            ExpectShell(workdir='wkdir', command=['pylint'],
+                        usePTY='slave-config')
+            + ExpectShell.log(
+                'stdio',
+                header='W: 11: Bad indentation. Found 6 spaces, expected 4\n')
+            + 0)
+        self.expectOutcome(result=SUCCESS, state_string='pylint')
         return self.runStep()
 
     def test_failure(self):
@@ -121,10 +186,9 @@ class PyLint(steps.BuildStepMixin, unittest.TestCase):
                 'stdio',
                 stdout=('W: 11: Bad indentation. Found 6 spaces, expected 4\n'
                         'F: 13: something really strange happened\n'))
-            + (python.PyLint.RC_WARNING|python.PyLint.RC_FATAL))
+            + (python.PyLint.RC_WARNING | python.PyLint.RC_FATAL))
         self.expectOutcome(result=FAILURE,
-                           status_text=['pylint', 'fatal=1', 'warning=1',
-                                        'failed'])
+                           state_string='pylint fatal=1 warning=1 (failure)')
         self.expectProperty('pylint-warning', 1)
         self.expectProperty('pylint-fatal', 1)
         return self.runStep()
@@ -142,8 +206,7 @@ class PyLint(steps.BuildStepMixin, unittest.TestCase):
                         'E: 12: Undefined variable \'foo\'\n'))
             + 0)
         self.expectOutcome(result=FAILURE,
-                           status_text=['pylint', 'error=1', 'warning=1',
-                                        'failed'])
+                           state_string='pylint error=1 warning=1 (failure)')
         self.expectProperty('pylint-warning', 1)
         self.expectProperty('pylint-error', 1)
         return self.runStep()
@@ -157,10 +220,9 @@ class PyLint(steps.BuildStepMixin, unittest.TestCase):
                 'stdio',
                 stdout=('W: 11: Bad indentation. Found 6 spaces, expected 4\n'
                         'C:  1:foo123: Missing docstring\n'))
-            + (python.PyLint.RC_WARNING|python.PyLint.RC_CONVENTION))
+            + (python.PyLint.RC_WARNING | python.PyLint.RC_CONVENTION))
         self.expectOutcome(result=WARNINGS,
-                           status_text=['pylint', 'convention=1', 'warning=1',
-                                        'warnings'])
+                           state_string='pylint convention=1 warning=1 (warnings)')
         self.expectProperty('pylint-warning', 1)
         self.expectProperty('pylint-convention', 1)
         self.expectProperty('pylint-total', 2)
@@ -176,10 +238,27 @@ class PyLint(steps.BuildStepMixin, unittest.TestCase):
                 'stdio',
                 stdout=('W: 11,0: Bad indentation. Found 6 spaces, expected 4\n'
                         'C:  3,10:foo123: Missing docstring\n'))
-            + (python.PyLint.RC_WARNING|python.PyLint.RC_CONVENTION))
+            + (python.PyLint.RC_WARNING | python.PyLint.RC_CONVENTION))
         self.expectOutcome(result=WARNINGS,
-                           status_text=['pylint', 'convention=1', 'warning=1',
-                                        'warnings'])
+                           state_string='pylint convention=1 warning=1 (warnings)')
+        self.expectProperty('pylint-warning', 1)
+        self.expectProperty('pylint-convention', 1)
+        self.expectProperty('pylint-total', 2)
+        return self.runStep()
+
+    def test_regex_text_131(self):
+        # at least pylint 1.3.1 prints out space padded column offsets when using text format
+        self.setupStep(python.PyLint(command=['pylint']))
+        self.expectCommands(
+            ExpectShell(workdir='wkdir', command=['pylint'],
+                        usePTY='slave-config')
+            + ExpectShell.log(
+                'stdio',
+                stdout=('W: 11, 0: Bad indentation. Found 6 spaces, expected 4\n'
+                        'C:  3,10:foo123: Missing docstring\n'))
+            + (python.PyLint.RC_WARNING | python.PyLint.RC_CONVENTION))
+        self.expectOutcome(result=WARNINGS,
+                           state_string='pylint convention=1 warning=1 (warnings)')
         self.expectProperty('pylint-warning', 1)
         self.expectProperty('pylint-convention', 1)
         self.expectProperty('pylint-total', 2)
@@ -194,10 +273,9 @@ class PyLint(steps.BuildStepMixin, unittest.TestCase):
                 'stdio',
                 stdout=('W0311: 11: Bad indentation.\n'
                         'C0111:  1:funcName: Missing docstring\n'))
-            + (python.PyLint.RC_WARNING|python.PyLint.RC_CONVENTION))
+            + (python.PyLint.RC_WARNING | python.PyLint.RC_CONVENTION))
         self.expectOutcome(result=WARNINGS,
-                           status_text=['pylint', 'convention=1', 'warning=1',
-                                        'warnings'])
+                           state_string='pylint convention=1 warning=1 (warnings)')
         self.expectProperty('pylint-warning', 1)
         self.expectProperty('pylint-convention', 1)
         self.expectProperty('pylint-total', 2)
@@ -213,10 +291,9 @@ class PyLint(steps.BuildStepMixin, unittest.TestCase):
                 'stdio',
                 stdout=('W0311: 11,0: Bad indentation.\n'
                         'C0111:  3,10:foo123: Missing docstring\n'))
-            + (python.PyLint.RC_WARNING|python.PyLint.RC_CONVENTION))
+            + (python.PyLint.RC_WARNING | python.PyLint.RC_CONVENTION))
         self.expectOutcome(result=WARNINGS,
-                           status_text=['pylint', 'convention=1', 'warning=1',
-                                        'warnings'])
+                           state_string='pylint convention=1 warning=1 (warnings)')
         self.expectProperty('pylint-warning', 1)
         self.expectProperty('pylint-convention', 1)
         self.expectProperty('pylint-total', 2)
@@ -231,10 +308,9 @@ class PyLint(steps.BuildStepMixin, unittest.TestCase):
                 'stdio',
                 stdout=('test.py:9: [W0311] Bad indentation.\n'
                         'test.py:3: [C0111, foo123] Missing docstring\n'))
-            + (python.PyLint.RC_WARNING|python.PyLint.RC_CONVENTION))
+            + (python.PyLint.RC_WARNING | python.PyLint.RC_CONVENTION))
         self.expectOutcome(result=WARNINGS,
-                           status_text=['pylint', 'convention=1', 'warning=1',
-                                        'warnings'])
+                           state_string='pylint convention=1 warning=1 (warnings)')
         self.expectProperty('pylint-warning', 1)
         self.expectProperty('pylint-convention', 1)
         self.expectProperty('pylint-total', 2)
@@ -249,13 +325,139 @@ class PyLint(steps.BuildStepMixin, unittest.TestCase):
                 'stdio',
                 stdout=('test.py:9: [W] Bad indentation.\n'
                         'test.py:3: [C, foo123] Missing docstring\n'))
-            + (python.PyLint.RC_WARNING|python.PyLint.RC_CONVENTION))
+            + (python.PyLint.RC_WARNING | python.PyLint.RC_CONVENTION))
         self.expectOutcome(result=WARNINGS,
-                           status_text=['pylint', 'convention=1', 'warning=1',
-                                        'warnings'])
+                           state_string='pylint convention=1 warning=1 (warnings)')
         self.expectProperty('pylint-warning', 1)
         self.expectProperty('pylint-convention', 1)
         self.expectProperty('pylint-total', 2)
+        return self.runStep()
+
+    def test_regex_parseable_131(self):
+        """ In pylint 1.3.1, output parseable is deprecated, but looks like
+        that, this is also the new recommended format string:
+            --msg-template={path}:{line}: [{msg_id}({symbol}), {obj}] {msg}
+        """
+        self.setupStep(python.PyLint(command=['pylint']))
+        self.expectCommands(
+            ExpectShell(workdir='wkdir', command=['pylint'],
+                        usePTY='slave-config')
+            + ExpectShell.log(
+                'stdio',
+                stdout=('test.py:9: [W0311(bad-indentation), ] Bad indentation. Found 6 spaces, expected 4\n'
+                        'test.py:3: [C0111(missing-docstring), myFunc] Missing function docstring\n'))
+            + (python.PyLint.RC_WARNING | python.PyLint.RC_CONVENTION))
+        self.expectOutcome(result=WARNINGS,
+                           state_string='pylint convention=1 warning=1 (warnings)')
+        self.expectProperty('pylint-warning', 1)
+        self.expectProperty('pylint-convention', 1)
+        self.expectProperty('pylint-total', 2)
+        return self.runStep()
+
+
+class PyFlakes(steps.BuildStepMixin, unittest.TestCase):
+
+    def setUp(self):
+        return self.setUpBuildStep()
+
+    def tearDown(self):
+        return self.tearDownBuildStep()
+
+    def test_success(self):
+        self.setupStep(python.PyFlakes())
+        self.expectCommands(
+            ExpectShell(workdir='wkdir', command=['make', 'pyflakes'],
+                        usePTY='slave-config')
+            + 0)
+        self.expectOutcome(result=SUCCESS, state_string='pyflakes')
+        return self.runStep()
+
+    def test_content_in_header(self):
+        self.setupStep(python.PyFlakes())
+        self.expectCommands(
+            ExpectShell(workdir='wkdir', command=['make', 'pyflakes'],
+                        usePTY='slave-config')
+            + ExpectShell.log(
+                'stdio',
+                # don't match pyflakes-like output in the header
+                header="foo.py:1: 'bar' imported but unused\n")
+            + 0)
+        self.expectOutcome(result=0, state_string='pyflakes')
+        return self.runStep()
+
+    def test_unused(self):
+        self.setupStep(python.PyFlakes())
+        self.expectCommands(
+            ExpectShell(workdir='wkdir', command=['make', 'pyflakes'],
+                        usePTY='slave-config')
+            + ExpectShell.log(
+                'stdio',
+                stdout="foo.py:1: 'bar' imported but unused\n")
+            + 1)
+        self.expectOutcome(result=WARNINGS,
+                           state_string='pyflakes unused=1 (warnings)')
+        self.expectProperty('pyflakes-unused', 1)
+        self.expectProperty('pyflakes-total', 1)
+        return self.runStep()
+
+    def test_undefined(self):
+        self.setupStep(python.PyFlakes())
+        self.expectCommands(
+            ExpectShell(workdir='wkdir', command=['make', 'pyflakes'],
+                        usePTY='slave-config')
+            + ExpectShell.log(
+                'stdio',
+                stdout="foo.py:1: undefined name 'bar'\n")
+            + 1)
+        self.expectOutcome(result=FAILURE,
+                           state_string='pyflakes undefined=1 (failure)')
+        self.expectProperty('pyflakes-undefined', 1)
+        self.expectProperty('pyflakes-total', 1)
+        return self.runStep()
+
+    def test_redefs(self):
+        self.setupStep(python.PyFlakes())
+        self.expectCommands(
+            ExpectShell(workdir='wkdir', command=['make', 'pyflakes'],
+                        usePTY='slave-config')
+            + ExpectShell.log(
+                'stdio',
+                stdout="foo.py:2: redefinition of unused 'foo' from line 1\n")
+            + 1)
+        self.expectOutcome(result=WARNINGS,
+                           state_string='pyflakes redefs=1 (warnings)')
+        self.expectProperty('pyflakes-redefs', 1)
+        self.expectProperty('pyflakes-total', 1)
+        return self.runStep()
+
+    def test_importstar(self):
+        self.setupStep(python.PyFlakes())
+        self.expectCommands(
+            ExpectShell(workdir='wkdir', command=['make', 'pyflakes'],
+                        usePTY='slave-config')
+            + ExpectShell.log(
+                'stdio',
+                stdout="foo.py:1: 'from module import *' used; unable to detect undefined names\n")
+            + 1)
+        self.expectOutcome(result=WARNINGS,
+                           state_string='pyflakes import*=1 (warnings)')
+        self.expectProperty('pyflakes-import*', 1)
+        self.expectProperty('pyflakes-total', 1)
+        return self.runStep()
+
+    def test_misc(self):
+        self.setupStep(python.PyFlakes())
+        self.expectCommands(
+            ExpectShell(workdir='wkdir', command=['make', 'pyflakes'],
+                        usePTY='slave-config')
+            + ExpectShell.log(
+                'stdio',
+                stdout="foo.py:2: redefinition of function 'bar' from line 1\n")
+            + 1)
+        self.expectOutcome(result=WARNINGS,
+                           state_string='pyflakes misc=1 (warnings)')
+        self.expectProperty('pyflakes-misc', 1)
+        self.expectProperty('pyflakes-total', 1)
         return self.runStep()
 
 
@@ -268,12 +470,12 @@ class TestSphinx(steps.BuildStepMixin, unittest.TestCase):
         return self.tearDownBuildStep()
 
     def test_builddir_required(self):
-        self.assertRaises(TypeError, lambda :
-                python.Sphinx())
+        self.assertRaises(config.ConfigErrors, lambda:
+                          python.Sphinx())
 
     def test_bad_mode(self):
-        self.assertRaises(TypeError, lambda: python.Sphinx(
-                sphinx_builddir="_build", mode="don't care"))
+        self.assertRaises(config.ConfigErrors, lambda: python.Sphinx(
+            sphinx_builddir="_build", mode="don't care"))
 
     def test_success(self):
         self.setupStep(python.Sphinx(sphinx_builddir="_build"))
@@ -281,10 +483,10 @@ class TestSphinx(steps.BuildStepMixin, unittest.TestCase):
             ExpectShell(workdir='wkdir', usePTY='slave-config',
                         command=['sphinx-build', '.', '_build'])
             + ExpectShell.log('stdio',
-                stdout=log_output_success)
+                              stdout=log_output_success)
             + 0
         )
-        self.expectOutcome(result=SUCCESS, status_text=["sphinx", "0 warnings"])
+        self.expectOutcome(result=SUCCESS, state_string="sphinx 0 warnings")
         return self.runStep()
 
     def test_failure(self):
@@ -293,10 +495,11 @@ class TestSphinx(steps.BuildStepMixin, unittest.TestCase):
             ExpectShell(workdir='wkdir', usePTY='slave-config',
                         command=['sphinx-build', '.', '_build'])
             + ExpectShell.log('stdio',
-                stdout='oh noes!')
+                              stdout='oh noes!')
             + 1
         )
-        self.expectOutcome(result=FAILURE, status_text=["sphinx", "0 warnings", "failed"])
+        self.expectOutcome(result=FAILURE,
+                           state_string="sphinx 0 warnings (failure)")
         return self.runStep()
 
     def test_nochange(self):
@@ -305,11 +508,11 @@ class TestSphinx(steps.BuildStepMixin, unittest.TestCase):
             ExpectShell(workdir='wkdir', usePTY='slave-config',
                         command=['sphinx-build', '.', '_build'])
             + ExpectShell.log('stdio',
-                stdout=log_output_nochange)
+                              stdout=log_output_nochange)
             + 0
         )
         self.expectOutcome(result=SUCCESS,
-                status_text=["sphinx", "0 warnings"])
+                           state_string="sphinx 0 warnings")
         return self.runStep()
 
     def test_warnings(self):
@@ -318,26 +521,27 @@ class TestSphinx(steps.BuildStepMixin, unittest.TestCase):
             ExpectShell(workdir='wkdir', usePTY='slave-config',
                         command=['sphinx-build', '.', '_build'])
             + ExpectShell.log('stdio',
-                stdout=log_output_warnings)
+                              stdout=log_output_warnings)
             + 0
         )
         self.expectOutcome(result=WARNINGS,
-                status_text=["sphinx", "2 warnings", "warnings"])
+                           state_string="sphinx 2 warnings (warnings)")
         self.expectLogfile("warnings", warnings)
         d = self.runStep()
+
         def check(_):
-            self.assertEqual(self.step_statistics, { 'warnings' : 2 })
+            self.assertEqual(self.step.statistics, {'warnings': 2})
         d.addCallback(check)
         return d
 
     def test_constr_args(self):
         self.setupStep(python.Sphinx(sphinx_sourcedir='src',
-                    sphinx_builddir="bld",
-                    sphinx_builder='css',
-                    sphinx="/path/to/sphinx-build",
-                    tags=['a', 'b'],
-                    defines=dict(empty=None, t=True, f=False, s="str"),
-                    mode='full'))
+                                     sphinx_builddir="bld",
+                                     sphinx_builder='css',
+                                     sphinx="/path/to/sphinx-build",
+                                     tags=['a', 'b'],
+                                     defines=dict(empty=None, t=True, f=False, s="str"),
+                                     mode='full'))
         self.expectCommands(
             ExpectShell(workdir='wkdir', usePTY='slave-config',
                         command=['/path/to/sphinx-build', '-b', 'css',
@@ -345,8 +549,8 @@ class TestSphinx(steps.BuildStepMixin, unittest.TestCase):
                                  '-D', 'f=0', '-D', 's=str', '-D', 't=1',
                                  '-E', 'src', 'bld'])
             + ExpectShell.log('stdio',
-                stdout=log_output_success)
+                              stdout=log_output_success)
             + 0
         )
-        self.expectOutcome(result=SUCCESS, status_text=["sphinx", "0 warnings"])
+        self.expectOutcome(result=SUCCESS, state_string="sphinx 0 warnings")
         return self.runStep()

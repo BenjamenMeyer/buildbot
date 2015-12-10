@@ -17,30 +17,42 @@
 
 Define the interfaces that are implemented by various buildbot classes.
 """
-# E0211: Method has no argument
-# E0213: Method should have "self" as first argument
-# pylint: disable-msg=E0211,E0213
 
-from zope.interface import Interface, Attribute
+# disable pylint warnings triggered by interface definitions
+# pylint: disable=no-self-argument
+# pylint: disable=no-method-argument
+
+from zope.interface import Attribute
+from zope.interface import Interface
 
 # exceptions that can be raised while trying to start a build
+
+
 class NoSlaveError(Exception):
     pass
+
+
 class BuilderInUseError(Exception):
     pass
+
+
 class BuildSlaveTooOldError(Exception):
     pass
+
+
 class LatentBuildSlaveFailedToSubstantiate(Exception):
     pass
 
-# other exceptions
-class BuildbotNotRunningError(Exception):
-    pass
 
-class ParameterError(Exception):
-    pass
+class IPlugin(Interface):
 
-class IChangeSource(Interface):
+    """
+    Base interface for all Buildbot plugins
+    """
+
+
+class IChangeSource(IPlugin):
+
     """
     Service which feeds Change objects to the changemaster. When files or
     directories are changed in version control, this object should represent
@@ -51,12 +63,14 @@ class IChangeSource(Interface):
     See 'Writing Change Sources' in the manual for more information.
     """
     master = Attribute('master',
-            'Pointer to BuildMaster, automatically set when started.')
+                       'Pointer to BuildMaster, automatically set when started.')
 
     def describe():
         """Return a string which briefly describes this source."""
 
+
 class ISourceStamp(Interface):
+
     """
     @cvar branch: branch from which source was drawn
     @type branch: string or None
@@ -99,18 +113,206 @@ class ISourceStamp(Interface):
         available, the caller should join them together with spaces before
         presenting them to the user."""
 
+
 class IEmailSender(Interface):
+
     """I know how to send email, and can be used by other parts of the
     Buildbot to contact developers."""
     pass
 
+
 class IEmailLookup(Interface):
+
     def getAddress(user):
         """Turn a User-name string into a valid email address. Either return
         a string (with an @ in it), None (to indicate that the user cannot
         be reached by email), or a Deferred which will fire with the same."""
 
+
+class ILogObserver(Interface):
+
+    """Objects which provide this interface can be used in a BuildStep to
+    watch the output of a LogFile and parse it incrementally.
+    """
+
+    # internal methods
+    def setStep(step):
+        pass
+
+    def setLog(log):
+        pass
+
+    # methods called by the LogFile
+    def logChunk(build, step, log, channel, text):
+        pass
+
+
+class IBuildSlave(IPlugin):
+    # callback methods from the manager
+    pass
+
+
+class ILatentBuildSlave(IBuildSlave):
+
+    """A build slave that is not always running, but can run when requested.
+    """
+    substantiated = Attribute('Substantiated',
+                              'Whether the latent build slave is currently '
+                              'substantiated with a real instance.')
+
+    def substantiate():
+        """Request that the slave substantiate with a real instance.
+
+        Returns a deferred that will callback when a real instance has
+        attached."""
+
+    # there is an insubstantiate too, but that is not used externally ATM.
+
+    def buildStarted(sb):
+        """Inform the latent build slave that a build has started.
+
+        @param sb: a L{LatentSlaveBuilder}.  The sb is the one for whom the
+        build finished.
+        """
+
+    def buildFinished(sb):
+        """Inform the latent build slave that a build has finished.
+
+        @param sb: a L{LatentSlaveBuilder}.  The sb is the one for whom the
+        build finished.
+        """
+
+
+class IRenderable(Interface):
+
+    """An object that can be interpolated with properties from a build.
+    """
+
+    def getRenderingFor(iprops):
+        """Return a deferred that fires with interpolation with the given properties
+
+        @param iprops: the L{IProperties} provider supplying the properties.
+        """
+
+
+class IProperties(Interface):
+
+    """
+    An object providing access to build properties
+    """
+
+    def getProperty(name, default=None):
+        """Get the named property, returning the default if the property does
+        not exist.
+
+        @param name: property name
+        @type name: string
+
+        @param default: default value (default: @code{None})
+
+        @returns: property value
+        """
+
+    def hasProperty(name):
+        """Return true if the named property exists.
+
+        @param name: property name
+        @type name: string
+        @returns: boolean
+        """
+
+    def has_key(name):
+        """Deprecated name for L{hasProperty}."""
+
+    def setProperty(name, value, source, runtime=False):
+        """Set the given property, overwriting any existing value.  The source
+        describes the source of the value for human interpretation.
+
+        @param name: property name
+        @type name: string
+
+        @param value: property value
+        @type value: JSON-able value
+
+        @param source: property source
+        @type source: string
+
+        @param runtime: (optional) whether this property was set during the
+        build's runtime: usually left at its default value
+        @type runtime: boolean
+        """
+
+    def getProperties():
+        """Get the L{buildbot.process.properties.Properties} instance storing
+        these properties.  Note that the interface for this class is not
+        stable, so where possible the other methods of this interface should be
+        used.
+
+        @returns: L{buildbot.process.properties.Properties} instance
+        """
+
+    def getBuild():
+        """Get the L{buildbot.process.build.Build} instance for the current
+        build.  Note that this object is not available after the build is
+        complete, at which point this method will return None.
+
+        Try to avoid using this method, as the API of L{Build} instances is not
+        well-defined.
+
+        @returns L{buildbot.process.build.Build} instance
+        """
+
+    def render(value):
+        """Render @code{value} as an L{IRenderable}.  This essentially coerces
+        @code{value} to an L{IRenderable} and calls its @L{getRenderingFor}
+        method.
+
+        @name value: value to render
+        @returns: rendered value
+        """
+
+
+class IScheduler(IPlugin):
+    pass
+
+
+class ITriggerableScheduler(Interface):
+
+    """
+    A scheduler that can be triggered by buildsteps.
+    """
+
+    def trigger(waited_for, sourcestamps=None, set_props=None,
+                parent_buildid=None, parent_relationship=None):
+        """Trigger a build with the given source stamp and properties.
+        """
+
+
+class IBuildStepFactory(Interface):
+
+    def buildStep():
+        pass
+
+
+class IBuildStep(IPlugin):
+
+    """
+    A build step
+    """
+    # Currently has nothing
+
+
+class IConfigured(Interface):
+
+    def getConfigDict():
+        pass
+
+
+# #################### Deprecated Status Interfaces   ###############################
+
+
 class IStatus(Interface):
+
     """I am an object, obtainable from the buildmaster, which can provide
     status information."""
 
@@ -138,7 +340,7 @@ class IStatus(Interface):
         """Return a list of ISchedulerStatus objects for all
         currently-registered Schedulers."""
 
-    def getBuilderNames(categories=None):
+    def getBuilderNames(tags=None):
         """Return a list of the names of all current Builders."""
     def getBuilder(name):
         """Return the IBuilderStatus object for a given named Builder. Raises
@@ -206,31 +408,33 @@ class IStatus(Interface):
         """Unregister an IStatusReceiver. No further status messgaes will be
         delivered."""
 
+
 class IBuildSetStatus(Interface):
+
     """I represent a set of Builds, each run on a separate Builder but all
     using the same source tree."""
 
     def getReason():
         pass
+
     def getID():
         """Return the BuildSet's ID string, if any. The 'try' feature uses a
         random string as a BuildSetID to relate submitted jobs with the
         resulting BuildSet."""
     def getResponsibleUsers():
-        pass # not implemented
+        pass  # not implemented
+
     def getInterestedUsers():
-        pass # not implemented
+        pass  # not implemented
+
     def getBuilderNames():
         """Return a list of the names of all Builders on which this set will
         do builds.
-        
+
         @returns: list of names via Deferred"""
     def isFinished():
         pass
-    def waitUntilSuccess():
-        """Return a Deferred that fires (with this IBuildSetStatus object)
-        when the outcome of the BuildSet is known, i.e., upon the first
-        failure, or after all builds complete successfully."""
+
     def waitUntilFinished():
         """Return a Deferred that fires (with this IBuildSetStatus object)
         when all builds have finished."""
@@ -240,6 +444,7 @@ class IBuildSetStatus(Interface):
 
 
 class IBuildRequestStatus(Interface):
+
     """I represent a request to build a particular set of source code on a
     particular Builder. These requests may be merged by the time they are
     finally turned into a Build."""
@@ -278,6 +483,7 @@ class IBuildRequestStatus(Interface):
 
 
 class ISlaveStatus(Interface):
+
     def getName():
         """Return the name of the build slave."""
 
@@ -294,7 +500,9 @@ class ISlaveStatus(Interface):
         """Return a timestamp (seconds since epoch) indicating when the most
         recent message was received from the buildslave."""
 
+
 class ISchedulerStatus(Interface):
+
     def getName():
         """Return the name of this Scheduler (a string)."""
 
@@ -305,11 +513,12 @@ class ISchedulerStatus(Interface):
 
 
 class IBuilderStatus(Interface):
+
     def getName():
         """Return the name of this Builder (a string)."""
 
-    def getCategory():
-        """Return the category of this builder (a string)."""
+    def getDescription():
+        """Return the description of this builder (a string)."""
 
     def getState():
         # TODO: this isn't nearly as meaningful as it used to be
@@ -411,8 +620,10 @@ class IBuilderStatus(Interface):
         """Unregister an IStatusReceiver. No further status messgaes will be
         delivered."""
 
+
 class IEventSource(Interface):
-    def eventGenerator(branches=[], categories=[], committers=[], minTime=0):
+
+    def eventGenerator(branches=[], categories=[], committers=[], projects=[], minTime=0):
         """This function creates a generator which will yield all of this
         object's status events, starting with the most recent and progressing
         backwards in time. These events provide the IStatusEvent interface.
@@ -437,7 +648,9 @@ class IEventSource(Interface):
         this timestamp.
         """
 
+
 class IBuildStatus(Interface):
+
     """I represent the status of a single Build/BuildRequest. It could be
     in-progress or finished."""
 
@@ -462,15 +675,6 @@ class IBuildStatus(Interface):
         'forced', and 'periodic' are the most likely values. 'try' will be
         added in the future."""
 
-    def getSourceStamp():
-        """Return a SourceStamp object which can be used to re-create
-        the source tree that this build used.
-
-        This method will return None if the source information is no longer
-        available."""
-        # TODO: it should be possible to expire the patch but still remember
-        # that the build was r123+something.
-
     def getChanges():
         """Return a list of Change objects which represent which source
         changes went into the build."""
@@ -489,10 +693,8 @@ class IBuildStatus(Interface):
 
     def getInterestedUsers():
         """Return a list of Users who will want to know about the results of
-        this build. This is a superset of getResponsibleUsers(): it adds
-        people who are interested in this build but who did not actually
-        make the Changes that went into it (build sheriffs, code-domain
-        owners)."""
+        this build but who did not actually make the Changes that went into it
+        (build sheriffs, code-domain owners)."""
 
     def getNumber():
         """Within each builder, each Build has a number. Return it."""
@@ -516,11 +718,6 @@ class IBuildStatus(Interface):
 
     # while the build is running, the following methods make sense.
     # Afterwards they return None
-
-    def getETA():
-        """Returns the number of seconds from now in which the build is
-        expected to finish, or None if we can't make a guess. This guess will
-        be refined over time."""
 
     def getCurrentStep():
         """Return an IBuildStepStatus object representing the currently
@@ -566,120 +763,9 @@ class IBuildStatus(Interface):
         """Unregister an IStatusReceiver. No further status messgaes will be
         delivered."""
 
-class ITestResult(Interface):
-    """I describe the results of a single unit test."""
-
-    def getName():
-        """Returns a tuple of strings which make up the test name. Tests may
-        be arranged in a hierarchy, so looking for common prefixes may be
-        useful."""
-
-    def getResults():
-        """Returns a constant describing the results of the test: SUCCESS,
-        WARNINGS, FAILURE."""
-
-    def getText():
-        """Returns a list of short strings which describe the results of the
-        test in slightly more detail. Suggested components include
-        'failure', 'error', 'passed', 'timeout'."""
-
-    def getLogs():
-        # in flux, it may be possible to provide more structured information
-        # like python Failure instances
-        """Returns a dictionary of test logs. The keys are strings like
-        'stdout', 'log', 'exceptions'. The values are strings."""
-
-
-class IBuildStepStatus(Interface):
-    """I hold status for a single BuildStep."""
-
-    def getName():
-        """Returns a short string with the name of this step. This string
-        may have spaces in it."""
-
-    def getBuild():
-        """Returns the IBuildStatus object which contains this step."""
-
-    def getTimes():
-        """Returns a tuple of (start, end). 'start' and 'end' are the times
-        (seconds since the epoch) when the Step started and finished. If the
-        step has not yet started, 'start' will be None. If the step is still
-        running, 'end' will be None."""
-
-    def getExpectations():
-        """Returns a list of tuples (name, current, target). Each tuple
-        describes a single axis along which the step's progress can be
-        measured. 'name' is a string which describes the axis itself, like
-        'filesCompiled' or 'tests run' or 'bytes of output'. 'current' is a
-        number with the progress made so far, while 'target' is the value
-        that we expect (based upon past experience) to get to when the build
-        is finished.
-
-        'current' will change over time until the step is finished. It is
-        'None' until the step starts. When the build is finished, 'current'
-        may or may not equal 'target' (which is merely the expectation based
-        upon previous builds)."""
-
-    def getURLs():
-        """Returns a dictionary of URLs. Each key is a link name (a short
-        string, like 'results' or 'coverage'), and each value is a URL. These
-        links will be displayed along with the LogFiles.
-        """
-
-    def getLogs():
-        """Returns a list of IStatusLog objects. If the step has not yet
-        finished, this list may be incomplete (asking again later may give
-        you more of them)."""
-
-
-    def isFinished():
-        """Return a boolean. True means the step has finished, False means it
-        is still running."""
-
-    def waitUntilFinished():
-        """Return a Deferred that will fire when the step finishes. If the
-        step has already finished, this deferred will fire right away. The
-        callback is given this IBuildStepStatus instance as an argument."""
-
-    # while the step is running, the following methods make sense.
-    # Afterwards they return None
-
-    def getETA():
-        """Returns the number of seconds from now in which the step is
-        expected to finish, or None if we can't make a guess. This guess will
-        be refined over time."""
-
-    # Once you know the step has finished, the following methods are legal.
-    # Before ths step has finished, they all return None.
-
-    def getText():
-        """Returns a list of strings which describe the step. These are
-        intended to be displayed in a narrow column. If more space is
-        available, the caller should join them together with spaces before
-        presenting them to the user."""
-
-    def getResults():
-        """Return a tuple describing the results of the step: (result,
-        strings). 'result' is one of the constants in
-        buildbot.status.builder: SUCCESS, WARNINGS, FAILURE, or SKIPPED.
-        'strings' is an optional list of strings that the step wants to
-        append to the overall build's results. These strings are usually
-        more terse than the ones returned by getText(): in particular,
-        successful Steps do not usually contribute any text to the overall
-        build."""
-
-    # subscription interface
-
-    def subscribe(receiver, updateInterval=10):
-        """Register an IStatusReceiver to receive new status events. The
-        receiver will be given logStarted and logFinished messages. It will
-        also be given a ETAUpdate message every 'updateInterval' seconds."""
-
-    def unsubscribe(receiver):
-        """Unregister an IStatusReceiver. No further status messgaes will be
-        delivered."""
 
 class IStatusEvent(Interface):
+
     """I represent a Builder Event, something non-Build related that can
     happen to a Builder."""
 
@@ -697,130 +783,8 @@ class IStatusEvent(Interface):
         presenting them to the user."""
 
 
-LOG_CHANNEL_STDOUT = 0
-LOG_CHANNEL_STDERR = 1
-LOG_CHANNEL_HEADER = 2
-
-class IStatusLog(Interface):
-    """I represent a single Log, which is a growing list of text items that
-    contains some kind of output for a single BuildStep. I might be finished,
-    in which case this list has stopped growing.
-
-    Each Log has a name, usually something boring like 'log' or 'output'.
-    These names are not guaranteed to be unique, however they are usually
-    chosen to be useful within the scope of a single step (i.e. the Compile
-    step might produce both 'log' and 'warnings'). The name may also have
-    spaces. If you want something more globally meaningful, at least within a
-    given Build, try::
-
-      '%s.%s' % (log.getStep.getName(), log.getName())
-
-    The Log can be presented as plain text, or it can be accessed as a list
-    of items, each of which has a channel indicator (header, stdout, stderr)
-    and a text chunk. An HTML display might represent the interleaved
-    channels with different styles, while a straight download-the-text
-    interface would just want to retrieve a big string.
-
-    The 'header' channel is used by ShellCommands to prepend a note about
-    which command is about to be run ('running command FOO in directory
-    DIR'), and append another note giving the exit code of the process.
-
-    Logs can be streaming: if the Log has not yet finished, you can
-    subscribe to receive new chunks as they are added.
-
-    A ShellCommand will have a Log associated with it that gathers stdout
-    and stderr. Logs may also be created by parsing command output or
-    through other synthetic means (grepping for all the warnings in a
-    compile log, or listing all the test cases that are going to be run).
-    Such synthetic Logs are usually finished as soon as they are created."""
-
-
-    def getName():
-        """Returns a short string with the name of this log, probably 'log'.
-        """
-
-    def getStep():
-        """Returns the IBuildStepStatus which owns this log."""
-        # TODO: can there be non-Step logs?
-
-    def isFinished():
-        """Return a boolean. True means the log has finished and is closed,
-        False means it is still open and new chunks may be added to it."""
-
-    def waitUntilFinished():
-        """Return a Deferred that will fire when the log is closed. If the
-        log has already finished, this deferred will fire right away. The
-        callback is given this IStatusLog instance as an argument."""
-
-    def subscribe(receiver, catchup):
-        """Register an IStatusReceiver to receive chunks (with logChunk) as
-        data is added to the Log. If you use this, you will also want to use
-        waitUntilFinished to find out when the listener can be retired.
-        Subscribing to a closed Log is a no-op.
-
-        If 'catchup' is True, the receiver will immediately be sent a series
-        of logChunk messages to bring it up to date with the partially-filled
-        log. This allows a status client to join a Log already in progress
-        without missing any data. If the Log has already finished, it is too
-        late to catch up: just do getText() instead.
-
-        If the Log is very large, the receiver will be called many times with
-        a lot of data. There is no way to throttle this data. If the receiver
-        is planning on sending the data on to somewhere else, over a narrow
-        connection, you can get a throttleable subscription by using
-        C{subscribeConsumer} instead."""
-
-    def unsubscribe(receiver):
-        """Remove a receiver previously registered with subscribe(). Attempts
-        to remove a receiver which was not previously registered is a no-op.
-        """
-
-    def subscribeConsumer(consumer):
-        """Register an L{IStatusLogConsumer} to receive all chunks of the
-        logfile, including all the old entries and any that will arrive in
-        the future. The consumer will first have their C{registerProducer}
-        method invoked with a reference to an object that can be told
-        C{pauseProducing}, C{resumeProducing}, and C{stopProducing}. Then the
-        consumer's C{writeChunk} method will be called repeatedly with each
-        (channel, text) tuple in the log, starting with the very first. The
-        consumer will be notified with C{finish} when the log has been
-        exhausted (which can only happen when the log is finished). Note that
-        a small amount of data could be written via C{writeChunk} even after
-        C{pauseProducing} has been called.
-
-        To unsubscribe the consumer, use C{producer.stopProducing}."""
-
-    # once the log has finished, the following methods make sense. They can
-    # be called earlier, but they will only return the contents of the log up
-    # to the point at which they were called. You will lose items that are
-    # added later. Use C{subscribe} or C{subscribeConsumer} to avoid missing
-    # anything.
-
-    def hasContents():
-        """Returns True if the LogFile still has contents available. Returns
-        False for logs that have been pruned. Clients should test this before
-        offering to show the contents of any log."""
-
-    def getText():
-        """Return one big string with the contents of the Log. This merges
-        all non-header chunks together."""
-
-    def readlines(channel=LOG_CHANNEL_STDOUT):
-        """Read lines from one channel of the logfile. This returns an
-        iterator that will provide single lines of text (including the
-        trailing newline).
-        """
-
-    def getTextWithHeaders():
-        """Return one big string with the contents of the Log. This merges
-        all chunks (including headers) together."""
-
-    def getChunks():
-        """Generate a list of (channel, text) tuples. 'channel' is a number,
-        0 for stdout, 1 for stderr, 2 for header. (note that stderr is merged
-        into stdout if PTYs are in use)."""
-
 class IStatusLogConsumer(Interface):
+
     """I am an object which can be passed to IStatusLog.subscribeConsumer().
     I represent a target for writing the contents of an IStatusLog. This
     differs from a regular IStatusReceiver in that it can pause the producer.
@@ -850,7 +814,9 @@ class IStatusLogConsumer(Interface):
     def finish():
         """The log has finished sending chunks to the consumer."""
 
-class IStatusReceiver(Interface):
+
+class IStatusReceiver(IPlugin):
+
     """I am an object which can receive build status updates. I may be
     subscribed to an IStatus, an IBuilderStatus, or an IBuildStatus."""
 
@@ -996,18 +962,15 @@ class IStatusReceiver(Interface):
 
 
 class IControl(Interface):
+
     def addChange(change):
         """Add a change to the change queue, for analysis by schedulers."""
 
     def getBuilder(name):
         """Retrieve the IBuilderControl object for the given Builder."""
 
+
 class IBuilderControl(Interface):
-    def submitBuildRequest(ss, reason, props=None):
-        """Create a BuildRequest, which will eventually cause a build of the
-        given SourceStamp to be run on this builder. This returns a
-        BuildRequestStatus object via a Deferred, which can be used to keep
-        track of the builds that are performed."""
 
     def rebuildBuild(buildStatus, reason="<rebuild, no reason given>"):
         """Rebuild something we've already built before. This submits a
@@ -1040,7 +1003,9 @@ class IBuilderControl(Interface):
         # or something. However the event that is emitted is most useful in
         # the Builder column, so it kinda fits here too.
 
+
 class IBuildRequestControl(Interface):
+
     def subscribe(observer):
         """Register a callable that will be invoked (with a single
         IBuildControl object) for each Build that is created to satisfy this
@@ -1055,155 +1020,11 @@ class IBuildRequestControl(Interface):
         """Remove the build from the pending queue. Has no effect if the
         build has already been started."""
 
+
 class IBuildControl(Interface):
+
     def getStatus():
         """Return an IBuildStatus object for the Build that I control."""
     def stopBuild(reason="<no reason given>"):
         """Halt the build. This has no effect if the build has already
         finished."""
-
-class ILogFile(Interface):
-    """This is the internal interface to a LogFile, used by the BuildStep to
-    write data into the log.
-    """
-    def addStdout(data):
-        pass
-    def addStderr(data):
-        pass
-    def addHeader(data):
-        pass
-    def finish():
-        """The process that is feeding the log file has finished, and no
-        further data will be added. This closes the logfile."""
-
-class ILogObserver(Interface):
-    """Objects which provide this interface can be used in a BuildStep to
-    watch the output of a LogFile and parse it incrementally.
-    """
-
-    # internal methods
-    def setStep(step):
-        pass
-    def setLog(log):
-        pass
-
-    # methods called by the LogFile
-    def logChunk(build, step, log, channel, text):
-        pass
-
-class IBuildSlave(Interface):
-    # this is a marker interface for the BuildSlave class
-    pass
-
-class ILatentBuildSlave(IBuildSlave):
-    """A build slave that is not always running, but can run when requested.
-    """
-    substantiated = Attribute('Substantiated',
-                              'Whether the latent build slave is currently '
-                              'substantiated with a real instance.')
-
-    def substantiate():
-        """Request that the slave substantiate with a real instance.
-
-        Returns a deferred that will callback when a real instance has
-        attached."""
-
-    # there is an insubstantiate too, but that is not used externally ATM.
-
-    def buildStarted(sb):
-        """Inform the latent build slave that a build has started.
-
-        @param sb: a L{LatentSlaveBuilder}.  The sb is the one for whom the
-        build finished.
-        """
-
-    def buildFinished(sb):
-        """Inform the latent build slave that a build has finished.
-
-        @param sb: a L{LatentSlaveBuilder}.  The sb is the one for whom the
-        build finished.
-        """
-
-class IRenderable(Interface):
-    """An object that can be interpolated with properties from a build.
-    """
-
-    def getRenderingFor(iprops):
-        """Return the interpolation with the given properties
-
-        @param iprops: the L{IProperties} provider supplying the properties.
-        """
-class IProperties(Interface):
-    """
-    An object providing access to build properties
-    """
-
-    def getProperty(name, default=None):
-        """Get the named property, returning the default if the property does
-        not exist.
-
-        @param name: property name
-        @type name: string
-
-        @param default: default value (default: @code{None})
-
-        @returns: property value
-        """
-
-    def hasProperty(name):
-        """Return true if the named property exists.
-
-        @param name: property name
-        @type name: string
-        @returns: boolean
-        """
-
-    def has_key(name):
-        """Deprecated name for L{hasProperty}."""
-
-    def setProperty(name, value, source, runtime=False):
-        """Set the given property, overwriting any existing value.  The source
-        describes the source of the value for human interpretation.
-
-        @param name: property name
-        @type name: string
-
-        @param value: property value
-        @type value: JSON-able value
-
-        @param source: property source
-        @type source: string
-
-        @param runtime: (optional) whether this property was set during the
-        build's runtime: usually left at its default value
-        @type runtime: boolean
-        """
-
-    def getProperties():
-        """Get the L{buildbot.process.properties.Properties} instance storing
-        these properties.  Note that the interface for this class is not
-        stable, so where possible the other methods of this interface should be
-        used.
-
-        @returns: L{buildbot.process.properties.Properties} instance
-        """
-
-    def getBuild():
-        """Get the L{buildbot.process.build.Build} instance for the current
-        build.  Note that this object is not available after the build is
-        complete, at which point this method will return None.
-
-        Try to avoid using this method, as the API of L{Build} instances is not
-        well-defined.
-
-        @returns L{buildbot.process.build.Build} instance
-        """
-
-    def render(value):
-        """Render @code{value} as an L{IRenderable}.  This essentially coerces
-        @code{value} to an L{IRenderable} and calls its @L{getRenderingFor}
-        method.
-
-        @name value: value to render
-        @returns: rendered value
-        """

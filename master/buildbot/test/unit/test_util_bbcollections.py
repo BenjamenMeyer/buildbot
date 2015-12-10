@@ -13,23 +13,9 @@
 #
 # Copyright Buildbot Team Members
 
+from buildbot.util import bbcollections
 from twisted.trial import unittest
 
-from buildbot.util import bbcollections
-
-class defaultdict(unittest.TestCase):
-
-    # minimal tests here, since this is usually available from Python
-
-    def setUp(self):
-        self.dd = bbcollections.defaultdict(list)
-    
-    def test_getitem_default(self):
-        self.assertEqual(self.dd['x'], [])
-
-    def test_getitem_existing(self):
-        self.dd['y'] = 13
-        self.assertEqual(self.dd['y'], 13)
 
 class KeyedSets(unittest.TestCase):
 
@@ -51,8 +37,8 @@ class KeyedSets(unittest.TestCase):
 
     def test_discard_noError(self):
         self.ks.add('full', 12)
-        self.ks.discard('empty', 13) # should not fail
-        self.ks.discard('full', 13) # nor this
+        self.ks.discard('empty', 13)  # should not fail
+        self.ks.discard('full', 13)  # nor this
         self.assertEqual(self.ks['full'], set([12]))
 
     def test_discard_existing(self):

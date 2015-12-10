@@ -12,15 +12,17 @@
 # Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
 # Copyright Buildbot Team Members
-
 import os
 import shutil
-import cPickle
-from buildbot.test.util import db
 
-from buildbot.changes.changes import Change, OldChangeMaster
+from buildbot.test.util import db
+from buildbot.util import pickle
+
+from buildbot.changes.changes import Change
+
 
 class ChangeImportMixin(db.RealDatabaseMixin):
+
     """
     We have a number of tests that examine the results of importing particular
     flavors of Change objects.  This class uses some pickling to make this easy
@@ -28,16 +30,22 @@ class ChangeImportMixin(db.RealDatabaseMixin):
 
     This is a subclass of RealDatabaseMixin, so do not inherit from that class
     separately!
-
-    >>> self.make_pickle(self.make_change(who=u'jimmy'), self.make_change(who='johnny'))
     """
+
+    # on postgres, at least, many of these tests can take longer than the default
+    # 120s (!!)
+    timeout = 240
+
     def make_pickle(self, *changes, **kwargs):
         recode_fn = kwargs.pop('recode_fn', None)
-        cm = OldChangeMaster()
+        # this uses the now-defunct ChangeMaster, which exists only in the
+        # buildbot.util.pickle module
+        cm = pickle.ChangeMaster()
         cm.changes = changes
         if recode_fn:
             recode_fn(cm)
-        cPickle.dump(cm, open(self.changes_pickle, "wb"))
+        with open(self.changes_pickle, "wb") as f:
+            pickle.dump(cm, f)
 
     def make_change(self, **kwargs):
         return Change(**kwargs)
@@ -52,8 +60,9 @@ class ChangeImportMixin(db.RealDatabaseMixin):
 
     def tearDownChangeImport(self):
         d = self.tearDownRealDatabase()
+
+        @d.addCallback
         def rmtree(_):
             if os.path.exists(self.basedir):
                 shutil.rmtree(self.basedir)
-        d.addCallback(rmtree)
         return d

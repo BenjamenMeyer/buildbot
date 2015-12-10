@@ -13,28 +13,23 @@
 #
 # Copyright Buildbot Team Members
 
-from twisted.spread import pb
 from twisted.internet import defer
 from twisted.python import log
 
-(ATTACHING, # slave attached, still checking hostinfo/etc
- IDLE, # idle, available for use
- PINGING, # build about to start, making sure it is still alive
- BUILDING, # build is running
- LATENT, # latent slave is not substantiated; similar to idle
+(ATTACHING,  # slave attached, still checking hostinfo/etc
+ IDLE,  # idle, available for use
+ PINGING,  # build about to start, making sure it is still alive
+ BUILDING,  # build is running
+ LATENT,  # latent slave is not substantiated; similar to idle
  SUBSTANTIATING,
  ) = range(6)
 
-class AbstractSlaveBuilder(pb.Referenceable):
-    """I am the master-side representative for one of the
-    L{buildbot.slave.bot.SlaveBuilder} objects that lives in a remote
-    buildbot. When a remote builder connects, I query it for command versions
-    and then make it available to any Builds that are ready to run. """
+
+class AbstractSlaveBuilder(object):
 
     def __init__(self):
         self.ping_watchers = []
-        self.state = None # set in subclass
-        self.remote = None
+        self.state = None  # set in subclass
         self.slave = None
         self.builder_name = None
         self.locks = None
@@ -75,25 +70,30 @@ class AbstractSlaveBuilder(pb.Referenceable):
 
     def buildStarted(self):
         self.state = BUILDING
+        # AbstractBuildSlave doesn't always have a buildStarted method
+        # so only call it if it is available.
+        try:
+            slave_buildStarted = self.slave.buildStarted
+        except AttributeError:
+            pass
+        else:
+            slave_buildStarted(self)
 
     def buildFinished(self):
         self.state = IDLE
         if self.slave:
             self.slave.buildFinished(self)
 
-    def attached(self, slave, remote, commands):
+    def attached(self, slave, commands):
         """
         @type  slave: L{buildbot.buildslave.BuildSlave}
         @param slave: the BuildSlave that represents the buildslave as a
                       whole
-        @type  remote: L{twisted.spread.pb.RemoteReference}
-        @param remote: a reference to the L{buildbot.slave.bot.SlaveBuilder}
         @type  commands: dict: string -> string, or None
         @param commands: provides the slave's version of each RemoteCommand
         """
         self.state = ATTACHING
-        self.remote = remote
-        self.remoteCommands = commands # maps command name to version
+        self.remoteCommands = commands  # maps command name to version
         if self.slave is None:
             self.slave = slave
             self.slave.addSlaveBuilder(self)
@@ -104,20 +104,17 @@ class AbstractSlaveBuilder(pb.Referenceable):
         d = defer.succeed(None)
 
         d.addCallback(lambda _:
-            self.remote.callRemote("setMaster", self))
+                      self.slave.conn.remotePrint(message="attached"))
 
-        d.addCallback(lambda _:
-            self.remote.callRemote("print", "attached"))
-
+        @d.addCallback
         def setIdle(res):
             self.state = IDLE
             return self
-        d.addCallback(setIdle)
 
         return d
 
     def prepare(self, builder_status, build):
-        if not self.slave.acquireLocks():
+        if not self.slave or not self.slave.acquireLocks():
             return defer.succeed(False)
         return defer.succeed(True)
 
@@ -141,13 +138,13 @@ class AbstractSlaveBuilder(pb.Referenceable):
                 self.ping_watchers.insert(0, d2)
                 # I think it will make the tests run smoother if the status
                 # is updated before the ping completes
-            Ping().ping(self.remote).addCallback(self._pong)
+            Ping().ping(self.slave.conn).addCallback(self._pong)
 
+        @d.addCallback
         def reset_state(res):
             if self.state == PINGING:
                 self.state = oldstate
             return res
-        d.addCallback(reset_state)
         return d
 
     def _pong(self, res):
@@ -168,16 +165,15 @@ class AbstractSlaveBuilder(pb.Referenceable):
         if self.slave:
             self.slave.removeSlaveBuilder(self)
         self.slave = None
-        self.remote = None
         self.remoteCommands = None
 
 
 class Ping:
     running = False
 
-    def ping(self, remote):
+    def ping(self, conn):
         assert not self.running
-        if not remote:
+        if not conn:
             # clearly the ping must fail
             return defer.succeed(False)
         self.running = True
@@ -185,24 +181,21 @@ class Ping:
         self.d = defer.Deferred()
         # TODO: add a distinct 'ping' command on the slave.. using 'print'
         # for this purpose is kind of silly.
-        remote.callRemote("print", "ping").addCallbacks(self._pong,
-                                                        self._ping_failed,
-                                                        errbackArgs=(remote,))
+        conn.remotePrint(message="ping").addCallbacks(self._pong,
+                                                      self._ping_failed,
+                                                      errbackArgs=(conn,))
         return self.d
 
     def _pong(self, res):
         log.msg("ping finished: success")
         self.d.callback(True)
 
-    def _ping_failed(self, res, remote):
+    def _ping_failed(self, res, conn):
         log.msg("ping finished: failure")
         # the slave has some sort of internal error, disconnect them. If we
         # don't, we'll requeue a build and ping them again right away,
         # creating a nasty loop.
-        remote.broker.transport.loseConnection()
-        # TODO: except, if they actually did manage to get this far, they'll
-        # probably reconnect right away, and we'll do this game again. Maybe
-        # it would be better to leave them in the PINGING state.
+        conn.loseConnection()
         self.d.callback(False)
 
 
@@ -219,7 +212,9 @@ class SlaveBuilder(AbstractSlaveBuilder):
         self.slave = None
         self.state = ATTACHING
 
+
 class LatentSlaveBuilder(AbstractSlaveBuilder):
+
     def __init__(self, slave, builder):
         AbstractSlaveBuilder.__init__(self)
         self.slave = slave
@@ -236,19 +231,21 @@ class LatentSlaveBuilder(AbstractSlaveBuilder):
 
         log.msg("substantiating slave %s" % (self,))
         d = self.substantiate(build)
+
+        @d.addCallback
+        def substantiation_cancelled(res):
+            # if res is False, latent slave cancelled subtantiation
+            if not res:
+                self.state = LATENT
+            return res
+
+        @d.addErrback
         def substantiation_failed(f):
             builder_status.addPointEvent(['removing', 'latent',
                                           self.slave.slavename])
             self.slave.disconnect()
             # TODO: should failover to a new Build
             return f
-        def substantiation_cancelled(res):
-            # if res is False, latent slave cancelled subtantiation
-            if not res:
-                self.state = LATENT
-            return res
-        d.addCallback(substantiation_cancelled)
-        d.addErrback(substantiation_failed)
         return d
 
     def substantiate(self, build):
@@ -257,6 +254,7 @@ class LatentSlaveBuilder(AbstractSlaveBuilder):
         if not self.slave.substantiated:
             event = self.builder.builder_status.addEvent(
                 ["substantiating"])
+
             def substantiated(res):
                 msg = ["substantiate", "success"]
                 if isinstance(res, basestring):
@@ -266,6 +264,7 @@ class LatentSlaveBuilder(AbstractSlaveBuilder):
                 event.text = msg
                 event.finish()
                 return res
+
             def substantiation_failed(res):
                 event.text = ["substantiate", "failed"]
                 # TODO add log of traceback to event
@@ -278,10 +277,6 @@ class LatentSlaveBuilder(AbstractSlaveBuilder):
         AbstractSlaveBuilder.detached(self)
         self.state = LATENT
 
-    def buildStarted(self):
-        AbstractSlaveBuilder.buildStarted(self)
-        self.slave.buildStarted(self)
-
     def _attachFailure(self, why, where):
         self.state = LATENT
         return AbstractSlaveBuilder._attachFailure(self, why, where)
@@ -292,6 +287,3 @@ class LatentSlaveBuilder(AbstractSlaveBuilder):
                 status.addEvent(["ping", "latent"]).finish()
             return defer.succeed(True)
         return AbstractSlaveBuilder.ping(self, status)
-
-
-

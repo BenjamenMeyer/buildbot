@@ -14,15 +14,21 @@
 # Copyright Buildbot Team Members
 
 from docutils import nodes
-from sphinx.domains import Domain, ObjType, Index
-from sphinx.roles import XRefRole
-from sphinx.util.compat import Directive
-from sphinx.util import ws_re
-from sphinx.util.nodes import make_refnode
 from sphinx import addnodes
+from sphinx.domains import Domain
+from sphinx.domains import Index
+from sphinx.domains import ObjType
+from sphinx.roles import XRefRole
+from sphinx.util import ws_re
+from sphinx.util.compat import Directive
+from sphinx.util.docfields import DocFieldTransformer
+from sphinx.util.docfields import Field
+from sphinx.util.docfields import TypedField
+from sphinx.util.nodes import make_refnode
 
 
 class BBRefTargetDirective(Directive):
+
     """
     A directive that can be a target for references.  Attributes:
 
@@ -31,10 +37,12 @@ class BBRefTargetDirective(Directive):
     """
 
     has_content = False
+    name_annotation = None
     required_arguments = 1
     optional_arguments = 0
     final_argument_whitespace = True
     option_spec = {}
+    domain = 'bb'
 
     def run(self):
         env = self.state.document.settings.env
@@ -59,7 +67,7 @@ class BBRefTargetDirective(Directive):
             colon = tpl.find(':')
             if colon != -1:
                 indextype = tpl[:colon].strip()
-                indexentry = tpl[colon+1:].strip() % (fullname,)
+                indexentry = tpl[colon + 1:].strip() % (fullname,)
             else:
                 indextype = 'single'
                 indexentry = tpl % (fullname,)
@@ -69,11 +77,32 @@ class BBRefTargetDirective(Directive):
             inode = addnodes.index(entries=entries)
             ret.insert(0, inode)
 
-        return ret 
+        # if the node has content, set up a signature and parse the content
+        if self.has_content:
+            descnode = addnodes.desc()
+            descnode['domain'] = 'bb'
+            descnode['objtype'] = self.ref_type
+            descnode['noindex'] = True
+            signode = addnodes.desc_signature(fullname, '')
+
+            if self.name_annotation:
+                annotation = "%s " % self.name_annotation
+                signode += addnodes.desc_annotation(annotation, annotation)
+            signode += addnodes.desc_name(fullname, fullname)
+            descnode += signode
+
+            contentnode = addnodes.desc_content()
+            self.state.nested_parse(self.content, 0, contentnode)
+            DocFieldTransformer(self).transform_all(contentnode)
+            descnode += contentnode
+
+            ret.append(descnode)
+
+        return ret
 
     @classmethod
     def resolve_ref(cls, domain, env, fromdocname, builder, typ, target, node,
-                     contnode):
+                    contnode):
         """
         Resolve a reference to a directive of this class
         """
@@ -81,7 +110,8 @@ class BBRefTargetDirective(Directive):
         try:
             todocname, targetname = targets[target]
         except KeyError:
-            print "MISSING BB REFERENCE: bb:%s:%s" % (cls.ref_type, target)
+            env.warn(fromdocname, "Missing BB reference: bb:%s:%s" % (cls.ref_type, target),
+                     node.line)
             return None
 
         return make_refnode(builder, fromdocname,
@@ -89,16 +119,18 @@ class BBRefTargetDirective(Directive):
                             contnode, target)
 
 
-def make_ref_target_directive(ref_type, indextemplates=None):
+def make_ref_target_directive(ref_type, indextemplates=None, **kwargs):
     """
     Create and return a L{BBRefTargetDirective} subclass.
     """
+    class_vars = dict(ref_type=ref_type, indextemplates=indextemplates)
+    class_vars.update(kwargs)
     return type("BB%sRefTargetDirective" % (ref_type.capitalize(),),
-                (BBRefTargetDirective,),
-                dict(ref_type=ref_type, indextemplates=indextemplates))
+                (BBRefTargetDirective,), class_vars)
 
 
 class BBIndex(Index):
+
     """
     A Buildbot-specific index.
 
@@ -113,13 +145,13 @@ class BBIndex(Index):
             letter = name[0].upper()
             content.setdefault(letter, []).append(
                 (name, 0, docname, targetname, '', '', ''))
-        content = [ (l, sorted(content[l], key=lambda tup : tup[0].lower()))
-                    for l in sorted(content.keys()) ]
+        content = [(l, sorted(content[l], key=lambda tup: tup[0].lower()))
+                   for l in sorted(content.keys())]
         return (content, False)
 
     @classmethod
     def resolve_ref(cls, domain, env, fromdocname, builder, typ, target, node,
-                     contnode):
+                    contnode):
         """
         Resolve a reference to an index to the document containing the index,
         using the index's C{localname} as the content of the link.
@@ -148,60 +180,111 @@ class BBDomain(Domain):
     label = 'Buildbot'
 
     object_types = {
-        'cfg' : ObjType('cfg', 'cfg'),
-        'sched' : ObjType('sched', 'sched'),
-        'chsrc' : ObjType('chsrc', 'chsrc'),
-        'step' : ObjType('step', 'step'),
-        'status' : ObjType('status', 'status'),
-        'cmdline' : ObjType('cmdline', 'cmdline'),
+        'cfg': ObjType('cfg', 'cfg'),
+        'sched': ObjType('sched', 'sched'),
+        'chsrc': ObjType('chsrc', 'chsrc'),
+        'step': ObjType('step', 'step'),
+        'reporter': ObjType('reporter', 'reporter'),
+        'cmdline': ObjType('cmdline', 'cmdline'),
+        'msg': ObjType('msg', 'msg'),
+        'event': ObjType('event', 'event'),
+        'rtype': ObjType('rtype', 'rtype'),
+        'rpath': ObjType('rpath', 'rpath'),
     }
 
     directives = {
-        'cfg' : make_ref_target_directive('cfg',
-                indextemplates=[
-                    'single: Buildmaster Config; %s',
-                    'single: %s (Buildmaster Config)',
-                ]),
-        'sched' : make_ref_target_directive('sched',
-                indextemplates=[
-                    'single: Schedulers; %s',
-                    'single: %s Scheduler',
-                ]),
-        'chsrc' : make_ref_target_directive('chsrc',
-                indextemplates=[
-                    'single: Change Sources; %s',
-                    'single: %s Change Source',
-                ]),
-        'step' : make_ref_target_directive('step',
-                indextemplates=[
-                    'single: Build Steps; %s',
-                    'single: %s Build Step',
-                ]),
-        'status' : make_ref_target_directive('status',
-                indextemplates=[
-                    'single: Status Targets; %s',
-                    'single: %s Status Target',
-                ]),
-        'cmdline' : make_ref_target_directive('cmdline',
-                indextemplates=[
-                    'single: Command Line Subcommands; %s',
-                    'single: %s Command Line Subcommand',
-                ]),
+        'cfg': make_ref_target_directive('cfg',
+                                         indextemplates=[
+                                             'single: Buildmaster Config; %s',
+                                             'single: %s (Buildmaster Config)',
+                                         ]),
+        'sched': make_ref_target_directive('sched',
+                                           indextemplates=[
+                                               'single: Schedulers; %s',
+                                               'single: %s Scheduler',
+                                           ]),
+        'chsrc': make_ref_target_directive('chsrc',
+                                           indextemplates=[
+                                               'single: Change Sources; %s',
+                                               'single: %s Change Source',
+                                           ]),
+        'step': make_ref_target_directive('step',
+                                          indextemplates=[
+                                              'single: Build Steps; %s',
+                                              'single: %s Build Step',
+                                          ]),
+        'reporter': make_ref_target_directive('reporter',
+                                            indextemplates=[
+                                                'single: Reporter Targets; %s',
+                                                'single: %s Reporter Target',
+                                            ]),
+        'cmdline': make_ref_target_directive('cmdline',
+                                             indextemplates=[
+                                                 'single: Command Line Subcommands; %s',
+                                                 'single: %s Command Line Subcommand',
+                                             ]),
+        'msg': make_ref_target_directive('msg',
+                                         indextemplates=[
+                                             'single: Message Schema; %s',
+                                         ],
+                                         has_content=True,
+                                         name_annotation='routing key:',
+                                         doc_field_types=[
+                                             TypedField('key', label='Keys', names=('key',),
+                                                        typenames=('type',), can_collapse=True),
+                                             Field('var', label='Variable', names=('var',)),
+                                         ]),
+        'event': make_ref_target_directive('event',
+                                           indextemplates=[
+                                               'single: event; %s',
+                                           ],
+                                           has_content=True,
+                                           name_annotation='event:',
+                                           doc_field_types=[
+                                           ]),
+        'rtype': make_ref_target_directive('rtype',
+                                           indextemplates=[
+                                               'single: Resource Type; %s',
+                                           ],
+                                           has_content=True,
+                                           name_annotation='resource type:',
+                                           doc_field_types=[
+                                               TypedField('attr', label='Attributes', names=('attr',),
+                                                          typenames=('type',), can_collapse=True),
+                                           ]),
+        'rpath': make_ref_target_directive('rpath',
+                                           indextemplates=[
+                                               'single: Resource Path; %s',
+                                           ],
+                                           name_annotation='path:',
+                                           has_content=True,
+                                           doc_field_types=[
+                                               TypedField('pathkey', label='Path Keys',
+                                                          names=('pathkey',), typenames=('type',),
+                                                          can_collapse=True),
+                                               Field('event', label='Event',
+                                                     names=('event',)),
+                                               Field('opt', label='Option',
+                                                     names=('opt',)),
+                                           ]),
     }
 
     roles = {
-        'cfg' : XRefRole(),
-        'sched' : XRefRole(),
-        'chsrc' : XRefRole(),
-        'step' : XRefRole(),
-        'status' : XRefRole(),
-        'cmdline' : XRefRole(),
-
-        'index' : XRefRole(),
+        'cfg': XRefRole(),
+        'sched': XRefRole(),
+        'chsrc': XRefRole(),
+        'step': XRefRole(),
+        'reporter': XRefRole(),
+        'cmdline': XRefRole(),
+        'msg': XRefRole(),
+        'event': XRefRole(),
+        'rtype': XRefRole(),
+        'rpath': XRefRole(),
+        'index': XRefRole()
     }
 
     initial_data = {
-        'targets' : {}, # type -> target -> (docname, targetname)
+        'targets': {},  # type -> target -> (docname, targetname)
     }
 
     indices = [
@@ -209,8 +292,12 @@ class BBDomain(Domain):
         make_index("sched", "Scheduler Index"),
         make_index("chsrc", "Change Source Index"),
         make_index("step", "Build Step Index"),
-        make_index("status", "Status Target Index"),
+        make_index("reporter", "Reporter Target Index"),
         make_index("cmdline", "Command Line Index"),
+        make_index("msg", "MQ Routing Key Index"),
+        make_index("event", "Data API Event Index"),
+        make_index("rtype", "Data API Resource Type Index"),
+        make_index("rpath", "Data API Path Index"),
     ]
 
     def resolve_xref(self, env, fromdocname, builder, typ, target, node,
@@ -222,11 +309,11 @@ class BBDomain(Domain):
             else:
                 raise KeyError("no index named '%s'" % target)
             return idx.resolve_ref(self, env, fromdocname, builder, typ,
-                            target, node, contnode)
+                                   target, node, contnode)
         elif typ in self.directives:
             dir = self.directives[typ]
             return dir.resolve_ref(self, env, fromdocname, builder, typ,
-                            target, node, contnode)
+                                   target, node, contnode)
 
 
 def setup(app):

@@ -13,12 +13,6 @@
 #
 # Copyright Buildbot Team Members
 
-# garbage-collection rules: the following rows can be GCed:
-#  a patch that isn't referenced by any sourcestamps
-#  a sourcestamp that isn't referenced by any buildsets
-#  a buildrequest that isn't referenced by any buildsets
-#  a buildset which is complete and isn't referenced by anything in
-#   scheduler_upstream_buildsets
-#  a scheduler_upstream_buildsets row that is not active
-#  a build that references a non-existent buildrequest
-
+# a NULL constant to use in sqlalchemy whereclauses e.g. (tbl.c.results == NULL)
+# so that pep8 is happy
+NULL = None

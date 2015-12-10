@@ -14,17 +14,18 @@
 # Portions Copyright Buildbot Team Members
 # Portions Copyright Dan Radez <dradez+buildbot@redhat.com>
 # Portions Copyright Steve 'Ashcrow' Milner <smilner+buildbot@redhat.com>
-"""
-RPM Building steps.
-"""
+import os
 
+from buildbot import config
+from buildbot.process import buildstep
+from buildbot.process import logobserver
 from buildbot.steps.shell import ShellCommand
-from buildbot.process.buildstep import RemoteShellCommand
 
 
 class RpmBuild(ShellCommand):
+
     """
-    Build and RPM based on pased spec filename
+    RpmBuild build step.
     """
 
     name = "rpmbuilder"
@@ -46,104 +47,100 @@ class RpmBuild(ShellCommand):
                  vcsRevision=False,
                  **kwargs):
         """
-        Creates the RpmBuild object.
+        Create the RpmBuild object.
 
         @type specfile: str
-        @param specfile: the name of the spec file for the rpmbuild
+        @param specfile: location of the specfile to build
         @type topdir: str
-        @param topdir: the top directory for rpm building.
+        @param topdir: define the _topdir rpm parameter
         @type builddir: str
-        @param builddir: the directory to use for building
+        @param builddir: define the _builddir rpm parameter
         @type rpmdir: str
-        @param rpmdir: the directory to dump the rpms into
+        @param rpmdir: define the _rpmdir rpm parameter
         @type sourcedir: str
-        @param sourcedir: the directory that houses source code
+        @param sourcedir: define the _sourcedir rpm parameter
+        @type specdir: str
+        @param specdir: define the _specdir rpm parameter
         @type srcrpmdir: str
-        @param srcrpmdir: the directory to dump source rpms into
+        @param srcrpmdir: define the _srcrpmdir rpm parameter
         @type dist: str
-        @param dist: the distribution to build for
+        @param dist: define the dist string.
         @type autoRelease: boolean
-        @param autoRelease: if the auto release mechanics should be used
+        @param autoRelease: Use auto incrementing release numbers.
         @type vcsRevision: boolean
-        @param vcsRevision: if the vcs revision mechanics should be used
-        @type kwargs: dict
-        @param kwargs: All further keyword arguments.
+        @param vcsRevision: Use vcs version number as revision number.
         """
         ShellCommand.__init__(self, **kwargs)
-        self.addFactoryArguments(topdir=topdir,
-                                 builddir=builddir,
-                                 rpmdir=rpmdir,
-                                 sourcedir=sourcedir,
-                                 specdir=specdir,
-                                 srcrpmdir=srcrpmdir,
-                                 specfile=specfile,
-                                 dist=dist,
-                                 autoRelease=autoRelease,
-                                 vcsRevision=vcsRevision)
         self.rpmbuild = (
             'rpmbuild --define "_topdir %s" --define "_builddir %s"'
             ' --define "_rpmdir %s" --define "_sourcedir %s"'
             ' --define "_specdir %s" --define "_srcrpmdir %s"'
             ' --define "dist %s"' % (topdir, builddir, rpmdir, sourcedir,
-            specdir, srcrpmdir, dist))
+                                     specdir, srcrpmdir, dist))
         self.specfile = specfile
         self.autoRelease = autoRelease
         self.vcsRevision = vcsRevision
 
+        if not self.specfile:
+            config.error("You must specify a specfile")
+
+        self.addLogObserver(
+            'stdio', logobserver.LineConsumerLogObserver(self.logConsumer))
+
     def start(self):
-        """
-        Buildbot Calls Me when it's time to start
-        """
         if self.autoRelease:
             relfile = '%s.release' % (
-                self.os.path.basename(self.specfile).split('.')[0])
+                os.path.basename(self.specfile).split('.')[0])
             try:
-                rfile = open(relfile, 'r')
-                rel = int(rfile.readline().strip())
-                rfile.close()
-            except:
+                with open(relfile, 'r') as rfile:
+                    rel = int(rfile.readline().strip())
+            except (IOError, TypeError, ValueError):
                 rel = 0
             self.rpmbuild = self.rpmbuild + ' --define "_release %s"' % rel
-            rfile = open(relfile, 'w')
-            rfile.write(str(rel+1))
-            rfile.close()
+            with open(relfile, 'w') as rfile:
+                rfile.write(str(rel + 1))
 
         if self.vcsRevision:
-            self.rpmbuild = self.rpmbuild + ' --define "_revision %s"' % \
-                self.getProperty('got_revision')
+            revision = self.getProperty('got_revision')
+            # only do this in the case where there's a single codebase
+            if revision and not isinstance(revision, dict):
+                self.rpmbuild = (self.rpmbuild + ' --define "_revision %s"' %
+                                 revision)
 
         self.rpmbuild = self.rpmbuild + ' -ba %s' % self.specfile
 
-        self.command = ['bash', '-c', self.rpmbuild]
+        self.command = self.rpmbuild
 
         # create the actual RemoteShellCommand instance now
         kwargs = self.remote_kwargs
         kwargs['command'] = self.command
-        cmd = RemoteShellCommand(**kwargs)
+        kwargs['workdir'] = self.workdir
+        cmd = buildstep.RemoteShellCommand(**kwargs)
         self.setupEnvironment(cmd)
-        self.checkForOldSlaveAndLogfiles()
         self.startCommand(cmd)
+        self.addLogObserver(
+            'stdio', logobserver.LineConsumerLogObserver(self.logConsumer))
+
+    def logConsumer(self):
+        rpm_prefixes = ['Provides:', 'Requires(', 'Requires:',
+                        'Checking for unpackaged', 'Wrote:',
+                        'Executing(%', '+ ', 'Processing files:']
+        rpm_err_pfx = ['   ', 'RPM build errors:', 'error: ']
+        self.rpmcmdlog = []
+        self.rpmerrors = []
+
+        while True:
+            stream, line = yield
+            for pfx in rpm_prefixes:
+                if line.startswith(pfx):
+                    self.rpmcmdlog.append(line)
+                    break
+            for err in rpm_err_pfx:
+                if line.startswith(err):
+                    self.rpmerrors.append(line)
+                    break
 
     def createSummary(self, log):
-        """
-        Create nice summary logs.
-
-        @param log: The log to create summary off of.
-        """
-        rpm_prefixes = ['Provides:', 'Requires(rpmlib):', 'Requires:',
-                        'Checking for unpackaged', 'Wrote:',
-                        'Executing(%', '+ ']
-        rpm_err_pfx = ['   ', 'RPM build errors:', 'error: ']
-
-        rpmcmdlog = []
-        rpmerrors = []
-
-        for line in log.readlines():
-            for pfx in rpm_prefixes:
-                if pfx in line:
-                    rpmcmdlog.append(line)
-            for err in rpm_err_pfx:
-                if err in line:
-                    rpmerrors.append(line)
-        self.addCompleteLog('RPM Command Log', "".join(rpmcmdlog))
-        self.addCompleteLog('RPM Errors', "".join(rpmerrors))
+        self.addCompleteLog('RPM Command Log', "".join(self.rpmcmdlog))
+        if self.rpmerrors:
+            self.addCompleteLog('RPM Errors', "".join(self.rpmerrors))

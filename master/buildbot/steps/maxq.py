@@ -13,8 +13,23 @@
 #
 # Copyright Buildbot Team Members
 
+from buildbot import config
+from buildbot.process import buildstep
+from buildbot.process.results import FAILURE
+from buildbot.process.results import SUCCESS
 from buildbot.steps.shell import ShellCommand
-from buildbot.status.results import SUCCESS, FAILURE
+
+
+class MaxQObserver(buildstep.LogLineObserver):
+
+    def __init__(self):
+        buildstep.LogLineObserver.__init__(self)
+        self.failures = 0
+
+    def outLineReceived(self, line):
+        if line.startswith('TEST FAILURE:'):
+            self.failures += 1
+
 
 class MaxQ(ShellCommand):
     flunkOnFailure = True
@@ -22,25 +37,25 @@ class MaxQ(ShellCommand):
 
     def __init__(self, testdir=None, **kwargs):
         if not testdir:
-            raise TypeError("please pass testdir")
+            config.error("please pass testdir")
         kwargs['command'] = 'run_maxq.py %s' % (testdir,)
         ShellCommand.__init__(self, **kwargs)
-        self.addFactoryArguments(testdir=testdir)
+        self.observer = MaxQObserver()
+        self.addLogObserver('stdio', self.observer)
 
     def commandComplete(self, cmd):
-        output = cmd.logs['stdio'].getText()
-        self.failures = output.count('\nTEST FAILURE:')
+        self.failures = self.observer.failures
 
     def evaluateCommand(self, cmd):
         # treat a nonzero exit status as a failure, if no other failures are
         # detected
-        if not self.failures and cmd.rc != 0:
+        if not self.failures and cmd.didFail():
             self.failures = 1
         if self.failures:
             return FAILURE
         return SUCCESS
 
-    def getText(self, cmd, results):
+    def getResultSummary(self):
         if self.failures:
-            return [ str(self.failures), 'maxq', 'failures' ]
-        return ['maxq', 'tests']
+            return {u'step': u"%d maxq failures" % self.failures}
+        return {u'step': u'success'}

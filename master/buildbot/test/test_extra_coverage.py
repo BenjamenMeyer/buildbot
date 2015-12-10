@@ -17,49 +17,47 @@
 # included in the coverage because none of the tests import
 # them; this results in a more accurate total coverage percent.
 
-modules = [] # for the benefit of pyflakes
+modules = []  # for the benefit of pyflakes
 
 from buildbot import buildslave
 modules.extend([buildslave])
-from buildbot.changes import p4poller, svnpoller
+from buildbot.changes import p4poller
+from buildbot.changes import svnpoller
 modules.extend([p4poller, svnpoller])
-from buildbot.clients import base, sendchange, tryclient
+from buildbot.clients import base
+from buildbot.clients import sendchange
+from buildbot.clients import tryclient
 modules.extend([base, sendchange, tryclient])
-from buildbot.process import mtrlogobserver, subunitlogobserver
-modules.extend([mtrlogobserver, subunitlogobserver])
-from buildbot.scripts import checkconfig, logwatcher, reconfig, runner, startup
-modules.extend([checkconfig, logwatcher, reconfig, runner, startup])
-from buildbot.status import client, html, status_gerrit, status_push
-modules.extend([client, html, status_gerrit, status_push])
-from buildbot.status import tinderbox, words
-modules.extend([tinderbox, words])
-from buildbot.status.web import baseweb, build, builder, buildstatus, changes
-modules.extend([baseweb, build, builder, buildstatus, changes])
-from buildbot.status.web import console, feeds, grid, logs, olpb, root, slaves
-modules.extend([console, feeds, grid, logs, olpb, root, slaves])
-from buildbot.status.web import status_json, step, tests, waterfall
-modules.extend([status_json, step, tests, waterfall])
-from buildbot.steps import master, maxq, python, python_twisted, subunit
+from buildbot.process import subunitlogobserver
+modules.extend([subunitlogobserver])
+from buildbot.scripts import checkconfig
+from buildbot.scripts import logwatcher
+from buildbot.scripts import reconfig
+from buildbot.scripts import runner
+modules.extend([checkconfig, logwatcher, reconfig, runner])
+from buildbot.status import client
+modules.extend([client])
+from buildbot.steps import master
+from buildbot.steps import maxq
+from buildbot.steps import python
+from buildbot.steps import python_twisted
+from buildbot.steps import subunit
 modules.extend([master, maxq, python, python_twisted, subunit])
-from buildbot.steps import trigger, vstudio
+from buildbot.steps import trigger
+from buildbot.steps import vstudio
 modules.extend([trigger, vstudio])
-from buildbot.steps.package.rpm import rpmbuild, rpmlint, rpmspec
+from buildbot.steps.package.rpm import rpmbuild
+from buildbot.steps.package.rpm import rpmlint
+from buildbot.steps.package.rpm import rpmspec
 modules.extend([rpmbuild, rpmlint, rpmspec])
-from buildbot.util import eventual, loop, monkeypatches
-modules.extend([eventual, loop, monkeypatches])
-
-# require gobject
-#import buildbot.clients.gtkPanes
-#import buildbot.clients.debug
-
-# requires mercurial
-#import buildbot.changes.hgbuildbot
+from buildbot.util import eventual
+modules.extend([eventual])
 
 # requires libboto
-#import buildbot.ec2buildslave
+# import buildbot.ec2buildslave
 
 # requires libvirt
-#import buildbot.libvirtbuildslave
+# import buildbot.libvirtbuildslave
 
 # requires pycrypto
-#import buildbot.manhole
+# import buildbot.manhole

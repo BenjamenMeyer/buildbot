@@ -12,35 +12,50 @@
 # Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
 # Copyright Buildbot Team Members
+from __future__ import print_function
 
-import sys
 import os
-from twisted.internet import defer
-from buildbot import master
+import sys
 
-class ConfigLoader(object):
-    def __init__(self, basedir=os.getcwd(), configFileName="master.cfg"):
-        self.basedir = os.path.abspath(basedir)
-        self.configFileName = os.path.abspath(
-                                os.path.join(basedir, configFileName))
+from buildbot import config
+from buildbot.scripts.base import getConfigFileFromTac
+from buildbot.util import in_reactor
 
-    def load(self):
-        d = defer.succeed(None)
 
-        old_sys_path = sys.path[:]
+def _loadConfig(basedir, configFile, quiet):
+    try:
+        config.MasterConfig.loadConfig(
+            basedir, configFile)
+    except config.ConfigErrors as e:
+        if not quiet:
+            print("Configuration Errors:", file=sys.stderr)
+            for e in e.errors:
+                print("  " + e, file=sys.stderr)
+        return 1
 
-        def loadcfg(_):
-            sys.path.append(self.basedir)
+    if not quiet:
+        print("Config file is good!")
+    return 0
 
-            bmaster = master.BuildMaster(self.basedir, self.configFileName)
-            return bmaster.loadConfig(open(self.configFileName, "r"),
-                                      checkOnly=True)
-        d.addCallback(loadcfg)
 
-        # restore sys.path
-        def fixup(x):
-            sys.path[:] = old_sys_path
-            return x
-        d.addBoth(fixup)
+@in_reactor
+def checkconfig(config):
+    quiet = config.get('quiet')
+    configFile = config.get('configFile', os.getcwd())
 
-        return d
+    if os.path.isdir(configFile):
+        basedir = configFile
+        try:
+            configFile = getConfigFileFromTac(basedir)
+        except (SyntaxError, ImportError) as e:
+            if not quiet:
+                print("Unable to load 'buildbot.tac' from '%s':" % basedir)
+                print(e)
+            return 1
+    else:
+        basedir = os.getcwd()
+
+    return _loadConfig(basedir=basedir, configFile=configFile, quiet=quiet)
+
+
+__all__ = ['checkconfig']

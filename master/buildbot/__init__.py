@@ -12,33 +12,56 @@
 # Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
 # Copyright Buildbot Team Members
+#
+# Keep in sync with slave/buildslave/__init__.py
+#
+# We can't put this method in utility modules, because they import dependancy packages
+#
+from __future__ import with_statement
 
-# strategy:
-#
-# if there is a VERSION file, use its contents. otherwise, call git to
-# get a version string. if that also fails, use 'latest'.
-#
 import os
+import re
 
-version = "latest"
+from subprocess import PIPE
+from subprocess import Popen
+from subprocess import STDOUT
 
-try:
-    fn = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'VERSION')
-    version = open(fn).read().strip()
 
-except IOError:
-    from subprocess import Popen, PIPE, STDOUT
-    import re
-
-    VERSION_MATCH = re.compile(r'\d+\.\d+\.\d+(\w|-)*')
+def getVersion(init_file):
+    """
+    Return BUILDBOT_VERSION environment variable, content of VERSION file, git
+    tag or 'latest'
+    """
 
     try:
-        p = Popen(['git', 'describe', '--tags', '--always'], stdout=PIPE, stderr=STDOUT)
+        return os.environ['BUILDBOT_VERSION']
+    except KeyError:
+        pass
+
+    try:
+        cwd = os.path.dirname(os.path.abspath(init_file))
+        fn = os.path.join(cwd, 'VERSION')
+        with open(fn) as f:
+            return f.read().strip()
+    except IOError:
+        pass
+
+    # accept version to be coded with 2 or 3 parts (X.Y or X.Y.Z),
+    # no matter the number of digits for X, Y and Z
+    VERSION_MATCH = re.compile(r'(\d+\.\d+(\.\d+)?(\w|-)*)')
+
+    try:
+        p = Popen(['git', 'describe', '--tags', '--always'], stdout=PIPE, stderr=STDOUT, cwd=cwd)
         out = p.communicate()[0]
 
         if (not p.returncode) and out:
-            v = VERSION_MATCH.search(out)
+            v = VERSION_MATCH.search(str(out))
             if v:
-                version = v.group()
+                return v.group(1)
     except OSError:
         pass
+
+    return "latest"
+
+
+version = getVersion(__file__)

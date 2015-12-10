@@ -14,13 +14,21 @@
 # Copyright Buildbot Team Members
 
 import mock
-from twisted.trial import unittest
-from twisted.internet import defer
+
+from buildbot import config
+from buildbot.process import factory
 from buildbot.process.botmaster import BotMaster
+from buildbot.test.fake import fakemaster
+from twisted.internet import defer
+from twisted.trial import unittest
+
 
 class TestCleanShutdown(unittest.TestCase):
+
     def setUp(self):
-        self.botmaster = BotMaster(mock.Mock())
+        master = fakemaster.make_master(testcase=self, wantData=True)
+        self.botmaster = BotMaster()
+        self.botmaster.setServiceParent(master)
         self.reactor = mock.Mock()
         self.botmaster.startService()
 
@@ -101,10 +109,61 @@ class TestCleanShutdown(unittest.TestCase):
         # and the BuildRequestDistributor should be, as well
         self.assertTrue(self.botmaster.brd.running)
 
+
 class TestBotMaster(unittest.TestCase):
 
     def setUp(self):
-        self.botmaster = BotMaster(mock.Mock())
+        self.master = fakemaster.make_master(testcase=self, wantMq=True,
+                                             wantData=True)
+        self.master.mq = self.master.mq
+        self.master.botmaster.disownServiceParent()
+        self.botmaster = BotMaster()
+        self.botmaster.setServiceParent(self.master)
+        self.new_config = mock.Mock()
+        self.botmaster.startService()
+
+    def tearDown(self):
+        return self.botmaster.stopService()
+
+    def test_reconfigServiceWithBuildbotConfig(self):
+        # check that reconfigServiceBuilders is called.
+        self.patch(self.botmaster, 'reconfigServiceBuilders',
+                   mock.Mock(side_effect=lambda c: defer.succeed(None)))
+        self.patch(self.botmaster, 'maybeStartBuildsForAllBuilders',
+                   mock.Mock())
+
+        new_config = mock.Mock()
+        d = self.botmaster.reconfigServiceWithBuildbotConfig(new_config)
+
+        @d.addCallback
+        def check(_):
+            self.botmaster.reconfigServiceBuilders.assert_called_with(
+                new_config)
+            self.assertTrue(
+                self.botmaster.maybeStartBuildsForAllBuilders.called)
+        return d
+
+    @defer.inlineCallbacks
+    def test_reconfigServiceBuilders_add_remove(self):
+        bc = config.BuilderConfig(name='bldr', factory=factory.BuildFactory(),
+                                  slavename='f')
+        self.new_config.builders = [bc]
+
+        yield self.botmaster.reconfigServiceBuilders(self.new_config)
+
+        bldr = self.botmaster.builders['bldr']
+        self.assertIdentical(bldr.parent, self.botmaster)
+        self.assertIdentical(bldr.master, self.master)
+        self.assertEqual(self.botmaster.builderNames, ['bldr'])
+
+        self.new_config.builders = []
+
+        yield self.botmaster.reconfigServiceBuilders(self.new_config)
+
+        self.assertIdentical(bldr.parent, None)
+        self.assertIdentical(bldr.master, None)
+        self.assertEqual(self.botmaster.builders, {})
+        self.assertEqual(self.botmaster.builderNames, [])
 
     def test_maybeStartBuildsForBuilder(self):
         brd = self.botmaster.brd = mock.Mock()
@@ -133,4 +192,3 @@ class TestBotMaster(unittest.TestCase):
         self.botmaster.maybeStartBuildsForAllBuilders()
 
         brd.maybeStartBuildsOn.assert_called_once_with(['frank', 'larry'])
-

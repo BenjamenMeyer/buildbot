@@ -12,28 +12,32 @@
 # Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
 # Copyright Buildbot Team Members
+from __future__ import print_function
 
+import os
+import platform
+import signal
 
-import os, signal, platform
 from twisted.internet import reactor
 
-from buildbot.scripts.logwatcher import LogWatcher, BuildmasterTimeoutError, \
-     ReconfigError
+from buildbot.scripts.logwatcher import BuildmasterTimeoutError
+from buildbot.scripts.logwatcher import LogWatcher
+from buildbot.scripts.logwatcher import ReconfigError
+from buildbot.util import in_reactor
+
 
 class Reconfigurator:
-    def run(self, config):
+
+    rc = 0
+
+    def run(self, basedir, quiet):
         # Returns "Microsoft" for Vista and "Windows" for other versions
         if platform.system() in ("Windows", "Microsoft"):
-            print "Reconfig (through SIGHUP) is not supported on Windows."
-            print "The 'buildbot debugclient' tool can trigger a reconfig"
-            print "remotely, but requires Gtk+ libraries to run."
+            print("Reconfig (through SIGHUP) is not supported on Windows.")
             return
 
-        basedir = config['basedir']
-        quiet = config['quiet']
-        os.chdir(basedir)
-        f = open("twistd.pid", "rt")
-        self.pid = int(f.read().strip())
+        with open(os.path.join(basedir, "twistd.pid"), "rt") as f:
+            self.pid = int(f.read().strip())
         if quiet:
             os.kill(self.pid, signal.SIGHUP)
             return
@@ -44,41 +48,45 @@ class Reconfigurator:
         # 10 seconds have elapsed.
 
         self.sent_signal = False
-        lw = LogWatcher("twistd.log")
+        reactor.callLater(0.2, self.sighup)
+
+        lw = LogWatcher(os.path.join(basedir, "twistd.log"))
         d = lw.start()
         d.addCallbacks(self.success, self.failure)
-        reactor.callLater(0.2, self.sighup)
-        reactor.run()
+        d.addBoth(lambda _: self.rc)
+        return d
 
     def sighup(self):
         if self.sent_signal:
             return
-        print "sending SIGHUP to process %d" % self.pid
+        print("sending SIGHUP to process %d" % self.pid)
         self.sent_signal = True
         os.kill(self.pid, signal.SIGHUP)
 
     def success(self, res):
-        print """
+        print("""
 Reconfiguration appears to have completed successfully.
-"""
-        reactor.stop()
+""")
 
     def failure(self, why):
+        self.rc = 1
         if why.check(BuildmasterTimeoutError):
-            print "Never saw reconfiguration finish."
+            print("Never saw reconfiguration finish.")
         elif why.check(ReconfigError):
-            print """
+            print("""
 Reconfiguration failed. Please inspect the master.cfg file for errors,
 correct them, then try 'buildbot reconfig' again.
-"""
+""")
         elif why.check(IOError):
             # we were probably unable to open the file in the first place
             self.sighup()
         else:
-            print "Error while following twistd.log: %s" % why
-        reactor.stop()
+            print("Error while following twistd.log: %s" % why)
 
+
+@in_reactor
 def reconfig(config):
+    basedir = config['basedir']
+    quiet = config['quiet']
     r = Reconfigurator()
-    r.run(config)
-
+    return r.run(basedir, quiet)

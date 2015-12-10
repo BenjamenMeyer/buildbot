@@ -12,352 +12,290 @@
 # Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
 # Copyright Buildbot Team Members
+from future.utils import iteritems
 
-from twisted.python import failure, log
-from twisted.application import service
-from twisted.internet import defer
-from buildbot.process.properties import Properties
-from buildbot.util import ComparableMixin
+
+from buildbot import config
+from buildbot import interfaces
 from buildbot.changes import changes
+from buildbot.process.properties import Properties
+from buildbot.util.service import ClusteredBuildbotService
+from buildbot.util.state import StateMixin
+from twisted.internet import defer
+from twisted.python import failure
+from twisted.python import log
+from zope.interface import implements
 
-def isScheduler(sch):
-    "Check that an object is a scheduler; used for configuration checks."
-    return isinstance(sch, BaseScheduler)
 
-class BaseScheduler(service.MultiService, ComparableMixin):
-    """
-    Base class for all schedulers; this provides the equipment to manage
-    reconfigurations and to handle basic scheduler state.  It also provides
-    utility methods to begin various sorts of builds.
+class BaseScheduler(ClusteredBuildbotService, StateMixin):
 
-    Subclasses should add any configuration-derived attributes to
-    C{base.Scheduler.compare_attrs}.
-    """
+    implements(interfaces.IScheduler)
 
-    compare_attrs = ('name', 'builderNames', 'properties')
+    DEFAULT_CODEBASES = {'': {}}
 
-    def __init__(self, name, builderNames, properties):
-        """
-        Initialize a Scheduler.
+    compare_attrs = ClusteredBuildbotService.compare_attrs + \
+        ('builderNames', 'properties', 'codebases')
 
-        @param name: name of this scheduler (used as a key for state)
-        @type name: unicode
+    def __init__(self, name, builderNames, properties=None,
+                 codebases=DEFAULT_CODEBASES):
+        super(BaseScheduler, self).__init__(name=name)
 
-        @param builderNames: list of builders this scheduler may start
-        @type builderNames: list of unicode
+        ok = True
+        if not isinstance(builderNames, (list, tuple)):
+            ok = False
+        else:
+            for b in builderNames:
+                if not isinstance(b, basestring):
+                    ok = False
+        if not ok:
+            config.error(
+                "The builderNames argument to a scheduler must be a list "
+                "of Builder names.")
 
-        @param properties: properties to add to builds triggered by this
-        scheduler
-        @type properties: dictionary
-
-        @param consumeChanges: true if this scheduler wishes to be informed
-        about the addition of new changes.  Defaults to False.  This should
-        be passed explicitly from subclasses to indicate their interest in
-        consuming changes.
-        @type consumeChanges: boolean
-        """
-        service.MultiService.__init__(self)
-        self.name = name
-        "name of this scheduler; used to identify replacements on reconfig"
-
-        errmsg = ("The builderNames argument to a scheduler must be a list "
-                  "of Builder names.")
-        assert isinstance(builderNames, (list, tuple)), errmsg
-        for b in builderNames:
-            assert isinstance(b, basestring), errmsg
         self.builderNames = builderNames
-        "list of builder names to start in each buildset"
 
+        if properties is None:
+            properties = {}
         self.properties = Properties()
-        "properties that are contributed to each buildset"
         self.properties.update(properties, "Scheduler")
         self.properties.setProperty("scheduler", name, "Scheduler")
+        self.objectid = None
 
-        self.schedulerid = None
-        """ID of this scheduler; set just before the scheduler starts, and set
-        to None after stopService is complete."""
+        # Set the codebases that are necessary to process the changes
+        # These codebases will always result in a sourcestamp with or without
+        # changes
+        known_keys = set(['branch', 'repository', 'revision'])
+        if codebases is None:
+            config.error("Codebases cannot be None")
+        elif isinstance(codebases, list):
+            codebases = dict((codebase, {}) for codebase in codebases)
+        elif not isinstance(codebases, dict):
+            config.error("Codebases must be a dict of dicts, or list of strings")
+        else:
+            for codebase, attrs in iteritems(codebases):
+                if not isinstance(attrs, dict):
+                    config.error("Codebases must be a dict of dicts")
+                else:
+                    unk = set(attrs) - known_keys
+                    if unk:
+                        config.error(
+                            "Unknown codebase keys %s for codebase %s"
+                            % (', '.join(unk), codebase))
 
-        self.master = None
-        """BuildMaster instance; set just before the scheduler starts, and set
-        to None after stopService is complete."""
+        self.codebases = codebases
 
         # internal variables
-        self._change_subscription = None
+        self._change_consumer = None
         self._change_consumption_lock = defer.DeferredLock()
-        self._objectid = None
 
-    ## service handling
+    # activity handling
 
-    def _setUpScheduler(self, schedulerid, master, manager):
-        # this is called by SchedulerManager *before* startService
-        self.schedulerid = schedulerid
-        self.master = master
+    def activate(self):
+        return defer.succeed(None)
 
-    def startService(self):
-        service.MultiService.startService(self)
+    def deactivate(self):
+        return defer.maybeDeferred(self._stopConsumingChanges)
 
-    def stopService(self):
-        d = defer.maybeDeferred(self._stopConsumingChanges)
-        d.addCallback(lambda _ : service.MultiService.stopService(self))
-        return d
+    # service handling
 
-    def _shutDownScheduler(self):
-        # called by SchedulerManager *after* stopService is complete
-        self.schedulerid = None
-        self.master = None
+    def _getServiceId(self):
+        return self.master.data.updates.findSchedulerId(self.name)
 
-    ## state management
+    def _claimService(self):
+        return self.master.data.updates.trySetSchedulerMaster(self.serviceid,
+                                                              self.master.masterid)
 
-    @defer.deferredGenerator
-    def getState(self, *args, **kwargs):
-        """
-        For use by subclasses; get a named state value from the scheduler's
-        state, defaulting to DEFAULT.
+    def _unclaimService(self):
+        return self.master.data.updates.trySetSchedulerMaster(self.serviceid,
+                                                              None)
 
-        @param name: name of the value to retrieve
-        @param default: (optional) value to return if C{name} is not present
-        @returns: state value via a Deferred
-        @raises KeyError: if C{name} is not present and no default is given
-        @raises TypeError: if JSON parsing fails
-        """
-        # get the objectid, if not known
-        if self._objectid is None:
-            wfd = defer.waitForDeferred(
-                self.master.db.state.getObjectId(self.name,
-                                        self.__class__.__name__))
-            yield wfd
-            self._objectid = wfd.getResult()
+    # status queries
 
-        wfd = defer.waitForDeferred(
-            self.master.db.state.getState(self._objectid, *args, **kwargs))
-        yield wfd
-        yield wfd.getResult()
-
-    @defer.deferredGenerator
-    def setState(self, key, value):
-        """
-        For use by subclasses; set a named state value in the scheduler's
-        persistent state.  Note that value must be json-able.
-
-        @param name: the name of the value to change
-        @param value: the value to set - must be a JSONable object
-        @param returns: Deferred
-        @raises TypeError: if JSONification fails
-        """
-        # get the objectid, if not known
-        if self._objectid is None:
-            wfd = defer.waitForDeferred(
-                self.master.db.state.getObjectId(self.name,
-                                        self.__class__.__name__))
-            yield wfd
-            self._objectid = wfd.getResult()
-
-        wfd = defer.waitForDeferred(
-            self.master.db.state.setState(self._objectid, key, value))
-        yield wfd
-        wfd.getResult()
-
-    ## status queries
-
-    # TODO: these aren't compatible with distributed schedulers
+    # deprecated: these aren't compatible with distributed schedulers
 
     def listBuilderNames(self):
-        "Returns the list of builder names"
         return self.builderNames
 
     def getPendingBuildTimes(self):
-        "Returns a list of the next times that builds are scheduled, if known."
         return []
 
-    ## change handling
+    # change handling
 
+    @defer.inlineCallbacks
     def startConsumingChanges(self, fileIsImportant=None, change_filter=None,
                               onlyImportant=False):
-        """
-        Subclasses should call this method from startService to register to
-        receive changes.  The BaseScheduler class will take care of filtering
-        the changes (using change_filter) and (if fileIsImportant is not None)
-        classifying them.  See L{gotChange}.  Returns a Deferred.
-
-        @param fileIsImportant: a callable provided by the user to distinguish
-        important and unimportant changes
-        @type fileIsImportant: callable
-
-        @param change_filter: a filter to determine which changes are even
-        considered by this scheduler, or C{None} to consider all changes
-        @type change_filter: L{buildbot.changes.filter.ChangeFilter} instance
-
-        @param onlyImportant: If True, only important changes, as specified by
-        fileIsImportant, will be added to the buildset.
-        @type onlyImportant: boolean
-
-        """
         assert fileIsImportant is None or callable(fileIsImportant)
 
-        # register for changes with master
-        assert not self._change_subscription
-        def changeCallback(change):
-            # ignore changes delivered while we're not running
-            if not self._change_subscription:
-                return
+        # register for changes with the data API
+        assert not self._change_consumer
+        self._change_consumer = yield self.master.mq.startConsuming(
+            lambda k, m: self._changeCallback(k, m, fileIsImportant,
+                                              change_filter, onlyImportant),
+            ('changes', None, 'new'))
 
-            if change_filter and not change_filter.filter_change(change):
-                return
-            if fileIsImportant:
-                try:
-                    important = fileIsImportant(change)
-                    if not important and onlyImportant:
-                        return
-                except:
-                    log.err(failure.Failure(),
-                            'in fileIsImportant check for %s' % change)
+    @defer.inlineCallbacks
+    def _changeCallback(self, key, msg, fileIsImportant, change_filter,
+                        onlyImportant):
+
+        # ignore changes delivered while we're not running
+        if not self._change_consumer:
+            return
+
+        # get a change object, since the API requires it
+        chdict = yield self.master.db.changes.getChange(msg['changeid'])
+        change = yield changes.Change.fromChdict(self.master, chdict)
+
+        # filter it
+        if change_filter and not change_filter.filter_change(change):
+            return
+        if change.codebase not in self.codebases:
+            log.msg(format='change contains codebase %(codebase)s that is '
+                    'not processed by scheduler %(name)s',
+                    codebase=change.codebase, name=self.name)
+            return
+        if fileIsImportant:
+            try:
+                important = fileIsImportant(change)
+                if not important and onlyImportant:
                     return
-            else:
-                important = True
+            except Exception:
+                log.err(failure.Failure(),
+                        'in fileIsImportant check for %s' % change)
+                return
+        else:
+            important = True
 
-            # use change_consumption_lock to ensure the service does not stop
-            # while this change is being processed
-            d = self._change_consumption_lock.acquire()
-            d.addCallback(lambda _ : self.gotChange(change, important))
-            def release(x):
-                self._change_consumption_lock.release()
-            d.addBoth(release)
-            d.addErrback(log.err, 'while processing change')
-        self._change_subscription = self.master.subscribeToChanges(changeCallback)
-
-        return defer.succeed(None)
+        # use change_consumption_lock to ensure the service does not stop
+        # while this change is being processed
+        d = self._change_consumption_lock.run(
+            self.gotChange, change, important)
+        d.addErrback(log.err, 'while processing change')
 
     def _stopConsumingChanges(self):
-        # (note: called automatically in stopService)
+        # (note: called automatically in deactivate)
 
         # acquire the lock change consumption lock to ensure that any change
         # consumption is complete before we are done stopping consumption
-        d = self._change_consumption_lock.acquire()
-        def stop(x):
-            if self._change_subscription:
-                self._change_subscription.unsubscribe()
-                self._change_subscription = None
-            self._change_consumption_lock.release()
-        d.addBoth(stop)
-        return d
+        def stop():
+            if self._change_consumer:
+                self._change_consumer.stopConsuming()
+                self._change_consumer = None
+        return self._change_consumption_lock.run(stop)
 
     def gotChange(self, change, important):
-        """
-        Called when a change is received; returns a Deferred.  If the
-        C{fileIsImportant} parameter to C{startConsumingChanges} was C{None},
-        then all changes are considered important.
-
-        @param change: the new change object
-        @type change: L{buildbot.changes.changes.Change} instance
-        @param important: true if this is an important change, according to
-        C{fileIsImportant}.
-        @type important: boolean
-        @returns: Deferred
-        """
         raise NotImplementedError
 
-    ## starting bulids
+    # starting builds
 
-    def addBuildsetForLatest(self, reason='', external_idstring=None,
-                        branch=None, repository='', project='',
-                        builderNames=None, properties=None):
-        """
-        Add a buildset for the 'latest' source in the given branch,
-        repository, and project.  This will create a relative sourcestamp for
-        the buildset.
+    @defer.inlineCallbacks
+    def addBuildsetForSourceStampsWithDefaults(self, reason, sourcestamps=None,
+                                               waited_for=False, properties=None, builderNames=None,
+                                               **kw):
+        if sourcestamps is None:
+            sourcestamps = []
 
-        This method will add any properties provided to the scheduler
-        constructor to the buildset, and will call the master's addBuildset
-        method with the appropriate parameters.
+        # convert sourcestamps to a dictionary keyed by codebase
+        stampsByCodebase = {}
+        for ss in sourcestamps:
+            cb = ss['codebase']
+            if cb in stampsByCodebase:
+                raise RuntimeError("multiple sourcestamps with same codebase")
+            stampsByCodebase[cb] = ss
 
-        @param reason: reason for this buildset
-        @type reason: unicode string
-        @param external_idstring: external identifier for this buildset, or None
-        @param branch: branch to build (note that None often has a special meaning)
-        @param repository: repository name for sourcestamp
-        @param project: project name for sourcestamp
-        @param builderNames: builders to name in the buildset (defaults to
-            C{self.builderNames})
-        @param properties: a properties object containing initial properties for
-            the buildset
-        @type properties: L{buildbot.process.properties.Properties}
-        @returns: (buildset ID, buildrequest IDs) via Deferred
-        """
-        d = self.master.db.sourcestamps.addSourceStamp(
-                branch=branch, revision=None, repository=repository,
-                project=project)
-        d.addCallback(self.addBuildsetForSourceStamp, reason=reason,
-                                external_idstring=external_idstring,
-                                builderNames=builderNames,
-                                properties=properties)
-        return d
+        # Merge codebases with the passed list of sourcestamps
+        # This results in a new sourcestamp for each codebase
+        stampsWithDefaults = []
+        for codebase in self.codebases:
+            cb = yield self.getCodebaseDict(codebase)
+            ss = {
+                'codebase': codebase,
+                'repository': cb.get('repository', ''),
+                'branch': cb.get('branch', None),
+                'revision': cb.get('revision', None),
+                'project': '',
+            }
+            # apply info from passed sourcestamps onto the configured default
+            # sourcestamp attributes for this codebase.
+            ss.update(stampsByCodebase.get(codebase, {}))
+            stampsWithDefaults.append(ss)
 
-    def addBuildsetForChanges(self, reason='', external_idstring=None,
-            changeids=[], builderNames=None, properties=None):
-        """
-        Add a buildset for the combination of the given changesets, creating
-        a sourcestamp based on those changes.  The sourcestamp for the buildset
-        will reference all of the indicated changes.
+        # fill in any supplied sourcestamps that aren't for a codebase in the
+        # scheduler's codebase dictionary
+        for codebase in set(stampsByCodebase) - set(self.codebases):
+            cb = stampsByCodebase[codebase]
+            ss = {
+                'codebase': codebase,
+                'repository': cb.get('repository', ''),
+                'branch': cb.get('branch', None),
+                'revision': cb.get('revision', None),
+                'project': '',
+            }
+            stampsWithDefaults.append(ss)
 
-        This method will add any properties provided to the scheduler
-        constructor to the buildset, and will call the master's addBuildset
-        method with the appropriate parameters.
+        rv = yield self.addBuildsetForSourceStamps(
+            sourcestamps=stampsWithDefaults, reason=reason,
+            waited_for=waited_for, properties=properties,
+            builderNames=builderNames, **kw)
+        defer.returnValue(rv)
 
-        @param reason: reason for this buildset
-        @type reason: unicode string
-        @param external_idstring: external identifier for this buildset, or None
-        @param changeids: nonempty list of changes to include in this buildset
-        @param builderNames: builders to name in the buildset (defaults to
-            C{self.builderNames})
-        @param properties: a properties object containing initial properties for
-            the buildset
-        @type properties: L{buildbot.process.properties.Properties}
-        @returns: (buildset ID, buildrequest IDs) via Deferred
-        """
-        assert changeids is not []
+    def getCodebaseDict(self, codebase):
+        # Hook for subclasses to change codebase parameters when a codebase does
+        # not have a change associated with it.
+        try:
+            return defer.succeed(self.codebases[codebase])
+        except KeyError:
+            return defer.fail()
 
-        # attributes for this sourcestamp will be based on the most recent
-        # change, so fetch the change with the highest id
-        d = self.master.db.changes.getChange(max(changeids))
-        def chdict2change(chdict):
-            if not chdict:
-                return None
-            return changes.Change.fromChdict(self.master, chdict)
-        d.addCallback(chdict2change)
-        def create_sourcestamp(change):
-            return self.master.db.sourcestamps.addSourceStamp(
-                    branch=change.branch,
-                    revision=change.revision,
-                    repository=change.repository,
-                    project=change.project,
-                    changeids=changeids)
-        d.addCallback(create_sourcestamp)
-        d.addCallback(self.addBuildsetForSourceStamp, reason=reason,
-                                external_idstring=external_idstring,
-                                builderNames=builderNames,
-                                properties=properties)
-        return d
+    @defer.inlineCallbacks
+    def addBuildsetForChanges(self, waited_for=False, reason='',
+                              external_idstring=None, changeids=None, builderNames=None,
+                              properties=None,
+                              **kw):
+        if changeids is None:
+            changeids = []
+        changesByCodebase = {}
 
-    def addBuildsetForSourceStamp(self, ssid, reason='', external_idstring=None,
-            properties=None, builderNames=None):
-        """
-        Add a buildset for the given, already-existing sourcestamp.
+        def get_last_change_for_codebase(codebase):
+            return max(changesByCodebase[codebase], key=lambda change: change["changeid"])
 
-        This method will add any properties provided to the scheduler
-        constructor to the buildset, and will call the master's
-        L{BuildMaster.addBuildset} method with the appropriate parameters, and
-        return the same result.
+        # Changes are retrieved from database and grouped by their codebase
+        for changeid in changeids:
+            chdict = yield self.master.db.changes.getChange(changeid)
+            changesByCodebase.setdefault(chdict["codebase"], []).append(chdict)
 
-        @param reason: reason for this buildset
-        @type reason: unicode string
-        @param external_idstring: external identifier for this buildset, or None
-        @param properties: a properties object containing initial properties for
-            the buildset
-        @type properties: L{buildbot.process.properties.Properties}
-        @param builderNames: builders to name in the buildset (defaults to
-            C{self.builderNames})
-        @returns: (buildset ID, buildrequest IDs) via Deferred
-        """
+        sourcestamps = []
+        for codebase in self.codebases:
+            if codebase not in changesByCodebase:
+                # codebase has no changes
+                # create a sourcestamp that has no changes
+                cb = yield self.getCodebaseDict(codebase)
+
+                ss = {
+                    'codebase': codebase,
+                    'repository': cb.get('repository', ''),
+                    'branch': cb.get('branch', None),
+                    'revision': cb.get('revision', None),
+                    'project': '',
+                }
+            else:
+                lastChange = get_last_change_for_codebase(codebase)
+                ss = lastChange['sourcestampid']
+            sourcestamps.append(ss)
+
+        # add one buildset, using the calculated sourcestamps
+        bsid, brids = yield self.addBuildsetForSourceStamps(
+            waited_for, sourcestamps=sourcestamps, reason=reason,
+            external_idstring=external_idstring, builderNames=builderNames,
+            properties=properties, **kw)
+
+        defer.returnValue((bsid, brids))
+
+    @defer.inlineCallbacks
+    def addBuildsetForSourceStamps(self, waited_for=False, sourcestamps=None,
+                                   reason='', external_idstring=None, properties=None,
+                                   builderNames=None, **kw):
+        if sourcestamps is None:
+            sourcestamps = []
         # combine properties
         if properties:
             properties.updateFromProperties(self.properties)
@@ -368,11 +306,18 @@ class BaseScheduler(service.MultiService, ComparableMixin):
         if not builderNames:
             builderNames = self.builderNames
 
+        # Get the builder id
+        builderids = list()
+        for bldr in (yield self.master.data.get(('builders', ))):
+            if bldr['name'] in builderNames:
+                builderids.append(bldr['builderid'])
+
         # translate properties object into a dict as required by the
         # addBuildset method
         properties_dict = properties.asDict()
 
-        # add the buildset
-        return self.master.addBuildset(
-                ssid=ssid, reason=reason, properties=properties_dict,
-                builderNames=builderNames, external_idstring=external_idstring)
+        bsid, brids = yield self.master.data.updates.addBuildset(
+            scheduler=self.name, sourcestamps=sourcestamps, reason=reason,
+            waited_for=waited_for, properties=properties_dict, builderids=builderids,
+            external_idstring=external_idstring, **kw)
+        defer.returnValue((bsid, brids))

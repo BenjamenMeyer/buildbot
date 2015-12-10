@@ -13,34 +13,21 @@
 #
 # Copyright Buildbot Team Members
 
-import mock
+from buildbot import interfaces
+from buildbot.status import client
+from buildbot.test.util import logging
 from twisted.trial import unittest
-from buildbot.status import master, client
-from buildbot.test.fake import fakedb
 
-class TestStatusClientPerspective(unittest.TestCase):
 
-    def makeStatusClientPersp(self):
-        m = mock.Mock(name='master')
-        self.db = m.db = fakedb.FakeDBConnector(self)
-        m.basedir = r'C:\BASEDIR'
-        s = master.Status(m) 
-        persp = client.StatusClientPerspective(s)
-        return persp
+class TestPBListener(logging.LoggingMixin, unittest.TestCase):
 
-    def test_getBuildSets(self):
-        persp = self.makeStatusClientPersp()
-        self.db.insertTestData([
-            fakedb.Buildset(id=91, sourcestampid=234, complete=0,
-                    complete_at=298297875, results=-1, submitted_at=266761875,
-                    external_idstring='extid', reason='rsn1'),
-        ])
+    def setUp(self):
+        self.setUpLogging()
 
-        d = persp.perspective_getBuildSets()
-        def check(bslist):
-            self.assertEqual(len(bslist), 1)
-            self.assertEqual(bslist[0][1], 91)
-            self.failUnlessIsInstance(bslist[0][0], client.RemoteBuildSet)
-        d.addCallback(check)
-        return d
+    def test_PBListener_logs(self):
+        client.PBListener(9989)
+        self.assertLogged('PBListener.*unused')
 
+    def test_PBListener_IStatusListener(self):
+        pbl = client.PBListener(9989)
+        self.failUnless(interfaces.IStatusReceiver.providedBy(pbl))

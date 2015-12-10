@@ -16,8 +16,9 @@
 import os
 
 from twisted.python import log
-from twisted.python.procutils import which
 from twisted.python import runtime
+from twisted.python.procutils import which
+
 
 def getCommand(name):
     possibles = which(name)
@@ -32,7 +33,7 @@ def getCommand(name):
     # does not seem to work properly with regard to errors raised
     # and catched in buildbot slave command (vcs.py)
     #
-    if runtime.platformType  == 'win32' and len(possibles) > 1:
+    if runtime.platformType == 'win32' and len(possibles) > 1:
         possibles_exe = which(name + ".exe")
         if possibles_exe:
             return possibles_exe[0]
@@ -42,19 +43,19 @@ def getCommand(name):
 if runtime.platformType != 'win32':
     WindowsError = RuntimeError
 
-if runtime.platformType  == 'win32':
+if runtime.platformType == 'win32':  # pragma: no cover
     def rmdirRecursive(dir):
         """This is a replacement for shutil.rmtree that works better under
         windows. Thanks to Bear at the OSAF for the code."""
         if not os.path.exists(dir):
             return
 
-        if os.path.islink(dir):
+        if os.path.islink(dir) or os.path.isfile(dir):
             os.remove(dir)
             return
 
         # Verify the directory is read/write/execute for the current user
-        os.chmod(dir, 0700)
+        os.chmod(dir, 0o700)
 
         # os.listdir below only returns a list of unicode filenames if the parameter is unicode
         # Thus, if a non-unicode-named dir contains a unicode filename, that filename will get garbled.
@@ -62,13 +63,15 @@ if runtime.platformType  == 'win32':
         if not isinstance(dir, unicode):
             try:
                 dir = unicode(dir, "utf-8")
-            except:
+            except UnicodeDecodeError:
                 log.err("rmdirRecursive: decoding from UTF-8 failed (ignoring)")
 
         try:
             list = os.listdir(dir)
-        except WindowsError, e:
-            log.msg("rmdirRecursive: unable to listdir %s (%s). Trying to remove like a dir" % (dir, e.strerror))
+        except WindowsError as e:
+            msg = ("rmdirRecursive: unable to listdir %s (%s). Trying to "
+                   "remove like a dir" % (dir, e.strerror.decode('mbcs')))
+            log.msg(msg.encode('utf-8'))
             os.rmdir(dir)
             return
 
@@ -81,15 +84,15 @@ if runtime.platformType  == 'win32':
                     # I think this is now redundant, but I don't have an NT
                     # machine to test on, so I'm going to leave it in place
                     # -warner
-                    os.chmod(full_name, 0600)
+                    os.chmod(full_name, 0o600)
 
             if os.path.islink(full_name):
-                os.remove(full_name) # as suggested in bug #792
+                os.remove(full_name)  # as suggested in bug #792
             elif os.path.isdir(full_name):
                 rmdirRecursive(full_name)
             else:
                 if os.path.isfile(full_name):
-                    os.chmod(full_name, 0700)
+                    os.chmod(full_name, 0o700)
                 os.remove(full_name)
         os.rmdir(dir)
 else:

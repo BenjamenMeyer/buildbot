@@ -13,58 +13,64 @@
 #
 # Copyright Buildbot Team Members
 
-from zope.interface import implements
-from twisted.application import service
-from twisted.internet import defer, task, reactor
+from twisted.internet import defer
 from twisted.python import log
+from zope.interface import implements
 
 from buildbot.interfaces import IChangeSource
-from buildbot import util
+from buildbot.util import service
+from buildbot.util.poll import method as poll_method
 
-class ChangeSource(service.Service, util.ComparableMixin):
+
+class ChangeSource(service.ClusteredBuildbotService):
     implements(IChangeSource)
-
-    master = None
-    "if C{self.running} is true, then C{cs.master} points to the buildmaster."
 
     def describe(self):
         pass
 
+    # activity handling
+
+    def activate(self):
+        return defer.succeed(None)
+
+    def deactivate(self):
+        return defer.succeed(None)
+
+    # service handling
+
+    def _getServiceId(self):
+        return self.master.data.updates.findChangeSourceId(self.name)
+
+    def _claimService(self):
+        return self.master.data.updates.trySetChangeSourceMaster(self.serviceid,
+                                                                 self.master.masterid)
+
+    def _unclaimService(self):
+        return self.master.data.updates.trySetChangeSourceMaster(self.serviceid,
+                                                                 None)
+
+
 class PollingChangeSource(ChangeSource):
-    """
-    Utility subclass for ChangeSources that use some kind of periodic polling
-    operation.  Subclasses should define C{poll} and set C{self.pollInterval}.
-    The rest is taken care of.
-    """
 
-    pollInterval = 60
-    "time (in seconds) between calls to C{poll}"
-
-    _loop = None
+    def __init__(self, name=None, pollInterval=60 * 10, pollAtLaunch=False):
+        ChangeSource.__init__(self, name=name)
+        self.pollInterval = pollInterval
+        self.pollAtLaunch = pollAtLaunch
 
     def poll(self):
-        """
-        Perform the polling operation, and return a deferred that will fire
-        when the operation is complete.  Failures will be logged, but the
-        method will be called again after C{pollInterval} seconds.
-        """
+        pass
 
-    def startService(self):
-        ChangeSource.startService(self)
-        def do_poll():
-            d = defer.maybeDeferred(self.poll)
-            d.addErrback(log.err, 'while polling for changes')
-            return d
+    @poll_method
+    def doPoll(self):
+        d = defer.maybeDeferred(self.poll)
+        d.addErrback(log.err, 'while polling for changes')
+        return d
 
-        # delay starting the loop until the reactor is running, and do not
-        # run it immediately - if services are still starting up, they may
-        # miss an initial flood of changes
-        def start_loop():
-            self._loop = task.LoopingCall(do_poll)
-            self._loop.start(self.pollInterval, now=False)
-        reactor.callWhenRunning(start_loop)
+    def force(self):
+        self.doPoll()
 
-    def stopService(self):
-        if self._loop and self._loop.running:
-            self._loop.stop()
-        return ChangeSource.stopService(self)
+    def activate(self):
+        self.doPoll.start(interval=self.pollInterval, now=self.pollAtLaunch)
+
+    def deactivate(self):
+        return self.doPoll.stop()

@@ -1,8 +1,8 @@
 .. ==================================
-   BuildBot Documentation - |version|
+   Buildbot Documentation - |version|
    ==================================
 
-This is the BuildBot documentation for Buildbot version |version|.
+This is the Buildbot documentation for Buildbot version |version|.
 
 If you are evaluating Buildbot and would like to get started quickly, start
 with the :doc:`Tutorial <tutorial/index>`.  Regular users of Buildbot should
@@ -19,25 +19,19 @@ Table Of Contents
    tutorial/index
    manual/index
    developer/index
-
-Indices and Tables
-==================
-
-* :ref:`genindex`
-* :bb:index:`cfg`
-* :bb:index:`sched`
-* :bb:index:`chsrc`
-* :bb:index:`step`
-* :bb:index:`status`
-* :bb:index:`cmdline`
-* :ref:`modindex`
-* :ref:`search`
+   relnotes/index
+   indices
 
 Copyright
 =========
 
-Copyright Buildbot Team Members
+This documentation is part of Buildbot.
 
-Copying and distribution of this file, with or without modification, are
-permitted in any medium without royalty provided the copyright notice and this
-notice are preserved.
+Buildbot is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, version 2.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with this program; if not, write to the Free Software Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+
+Copyright Buildbot Team Members

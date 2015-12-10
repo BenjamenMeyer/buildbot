@@ -14,13 +14,15 @@
 # Copyright Buildbot Team Members
 
 
+from buildbot.util import service
 from zope.interface import implements
-from twisted.application import service
 
+from buildbot import pbutil
+from buildbot import util
 from buildbot.interfaces import IStatusReceiver
-from buildbot import util, pbutil
 
-class StatusReceiver:
+
+class StatusReceiverBase:
     implements(IStatusReceiver)
 
     def requestSubmitted(self, request):
@@ -83,17 +85,29 @@ class StatusReceiver:
     def slaveDisconnected(self, slaveName):
         pass
 
+    def slavePaused(self, name):
+        pass
+
+    def slaveUnpaused(self, name):
+        pass
+
     def checkConfig(self, otherStatusReceivers):
         pass
 
-class StatusReceiverMultiService(StatusReceiver, service.MultiService,
+
+class StatusReceiverMultiService(StatusReceiverBase, service.AsyncMultiService,
                                  util.ComparableMixin):
-    implements(IStatusReceiver)
 
     def __init__(self):
-        service.MultiService.__init__(self)
+        service.AsyncMultiService.__init__(self)
+
+
+class StatusReceiverService(StatusReceiverBase, service.AsyncService,
+                            util.ComparableMixin):
+    pass
+
+StatusReceiver = StatusReceiverService
 
 
 class StatusReceiverPerspective(StatusReceiver, pbutil.NewCredPerspective):
     implements(IStatusReceiver)
-

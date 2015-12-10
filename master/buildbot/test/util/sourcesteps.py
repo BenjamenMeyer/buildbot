@@ -14,10 +14,12 @@
 # Copyright Buildbot Team Members
 
 import mock
+
 from buildbot.test.util import steps
 
 
 class SourceStepMixin(steps.BuildStepMixin):
+
     """
     Support for testing source steps.  Aside from the capabilities of
     L{BuildStepMixin}, this adds:
@@ -38,12 +40,15 @@ class SourceStepMixin(steps.BuildStepMixin):
 
     # utilities
 
-    def setupStep(self, step, args={}, **kwargs):
+    def setupStep(self, step, args=None, patch=None, **kwargs):
         """
         Set up C{step} for testing.  This calls L{BuildStepMixin}'s C{setupStep}
         and then does setup specific to a Source step.
         """
         step = steps.BuildStepMixin.setupStep(self, step, **kwargs)
+
+        if args is None:
+            args = {}
 
         ss = self.sourcestamp = mock.Mock(name="sourcestamp")
         ss.ssid = 9123
@@ -51,10 +56,8 @@ class SourceStepMixin(steps.BuildStepMixin):
         ss.revision = args.get('revision', None)
         ss.project = ''
         ss.repository = ''
-        ss.patch = None
+        ss.patch = patch
         ss.patch_info = None
         ss.changes = []
-
-        self.build.getSourceStamp = lambda : ss
+        self.build.getSourceStamp = lambda x=None: ss
         return step
-

@@ -16,29 +16,14 @@
 # this class is known to contain cruft and will be looked at later, so
 # no current implementation utilizes it aside from scripts.runner.
 
-from twisted.python import log
-from twisted.internet import defer
-from twisted.application import service
 from buildbot import pbutil
+from buildbot.util import service
+from twisted.internet import defer
+from twisted.python import log
 
-class UsersBase(service.MultiService):
-    """
-    Base class for services that manage users manually. This takes care
-    of the service.MultiService work needed by all the services that
-    subclass it.
-    """
-
-    def __init__(self):
-        service.MultiService.__init__(self)
-        self.master = None
-
-    def startService(self):
-        service.MultiService.startService(self)
-
-    def stopService(self):
-        return service.MultiService.stopService(self)
 
 class CommandlineUserManagerPerspective(pbutil.NewCredPerspective):
+
     """
     Perspective registered in buildbot.pbmanager and contains the real
     workings of `buildbot user` by working with the database when
@@ -96,7 +81,7 @@ class CommandlineUserManagerPerspective(pbutil.NewCredPerspective):
                     formatted_results += "no match found\n"
         return formatted_results
 
-    @defer.deferredGenerator
+    @defer.inlineCallbacks
     def perspective_commandline(self, op, bb_username, bb_password, ids, info):
         """
         This performs the requested operations from the `buildbot user`
@@ -129,27 +114,19 @@ class CommandlineUserManagerPerspective(pbutil.NewCredPerspective):
             for user in ids:
                 # get identifier, guaranteed to be in user from checks
                 # done in C{scripts.runner}
-                d = self.master.db.users.identifierToUid(identifier=user)
-                wfd = defer.waitForDeferred(d)
-                yield wfd
-                uid = wfd.getResult()
+                uid = yield self.master.db.users.identifierToUid(
+                    identifier=user)
 
                 result = None
                 if op == 'remove':
                     if uid:
-                        d = self.master.db.users.removeUser(uid)
-                        wfd = defer.waitForDeferred(d)
-                        yield wfd
-                        wfd.getResult()
+                        yield self.master.db.users.removeUser(uid)
                         result = user
                     else:
                         log.msg("Unable to find uid for identifier %s" % user)
                 elif op == 'get':
                     if uid:
-                        d = self.master.db.users.getUser(uid)
-                        wfd = defer.waitForDeferred(d)
-                        yield wfd
-                        result = wfd.getResult()
+                        result = yield self.master.db.users.getUser(uid)
                     else:
                         log.msg("Unable to find uid for identifier %s" % user)
 
@@ -159,24 +136,19 @@ class CommandlineUserManagerPerspective(pbutil.NewCredPerspective):
                 # get identifier, guaranteed to be in user from checks
                 # done in C{scripts.runner}
                 ident = user.pop('identifier')
-                d = self.master.db.users.identifierToUid(identifier=ident)
-                wfd = defer.waitForDeferred(d)
-                yield wfd
-                uid = wfd.getResult()
+                uid = yield self.master.db.users.identifierToUid(
+                    identifier=ident)
 
                 # if only an identifier was in user, we're updating only
                 # the bb_username and bb_password.
                 if not user:
                     if uid:
-                        d = self.master.db.users.updateUser(
-                                                       uid=uid,
-                                                       identifier=ident,
-                                                       bb_username=bb_username,
-                                                       bb_password=bb_password)
-                        wfd = defer.waitForDeferred(d)
-                        yield wfd
+                        result = yield self.master.db.users.updateUser(
+                            uid=uid,
+                            identifier=ident,
+                            bb_username=bb_username,
+                            bb_password=bb_password)
                         results.append(ident)
-                        result = wfd.getResult()
                     else:
                         log.msg("Unable to find uid for identifier %s"
                                 % user)
@@ -184,55 +156,54 @@ class CommandlineUserManagerPerspective(pbutil.NewCredPerspective):
                     # when adding, we update the user after the first attr
                     once_through = False
                     for attr in user:
+                        result = None
                         if op == 'update' or once_through:
                             if uid:
-                                d = self.master.db.users.updateUser(
-                                                      uid=uid,
-                                                      identifier=ident,
-                                                      bb_username=bb_username,
-                                                      bb_password=bb_password,
-                                                      attr_type=attr,
-                                                      attr_data=user[attr])
+                                result = yield self.master.db.users.updateUser(
+                                    uid=uid,
+                                    identifier=ident,
+                                    bb_username=bb_username,
+                                    bb_password=bb_password,
+                                    attr_type=attr,
+                                    attr_data=user[attr])
                             else:
                                 log.msg("Unable to find uid for identifier %s"
                                         % user)
                         elif op == 'add':
-                            d = self.master.db.users.findUserByAttr(
-                                                      identifier=ident,
-                                                      attr_type=attr,
-                                                      attr_data=user[attr])
+                            result = yield self.master.db.users.findUserByAttr(
+                                identifier=ident,
+                                attr_type=attr,
+                                attr_data=user[attr])
                             once_through = True
-                        wfd = defer.waitForDeferred(d)
-                        yield wfd
                         results.append(ident)
-                        result = wfd.getResult()
 
                         # result is None from updateUser calls
                         if result:
                             results.append(result)
                             uid = result
         results = self.formatResults(op, results)
-        yield results
+        defer.returnValue(results)
 
-class CommandlineUserManager(UsersBase):
+
+class CommandlineUserManager(service.AsyncMultiService):
+
     """
     Service that runs to set up and register CommandlineUserManagerPerspective
     so `buildbot user` calls get to perspective_commandline.
     """
 
     def __init__(self, username=None, passwd=None, port=None):
-        UsersBase.__init__(self)
+        service.AsyncMultiService.__init__(self)
         assert username and passwd, ("A username and password pair must be given "
                                      "to connect and use `buildbot user`")
         self.username = username
         self.passwd = passwd
 
         assert port, "A port must be specified for a PB connection"
-        self.port = int(port)
+        self.port = port
         self.registration = None
 
     def startService(self):
-        UsersBase.startService(self)
         # set up factory and register with buildbot.pbmanager
         def factory(mind, username):
             return CommandlineUserManagerPerspective(self.master)
@@ -240,11 +211,13 @@ class CommandlineUserManager(UsersBase):
                                                            self.username,
                                                            self.passwd,
                                                            factory)
+        return service.AsyncMultiService.startService(self)
 
     def stopService(self):
-        d = defer.maybeDeferred(UsersBase.stopService, self)
+        d = defer.maybeDeferred(service.AsyncMultiService.stopService, self)
+
+        @d.addCallback
         def unreg(_):
             if self.registration:
                 return self.registration.unregister()
-        d.addCallback(unreg)
         return d

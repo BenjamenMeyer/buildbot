@@ -13,10 +13,11 @@
 #
 # Copyright Buildbot Team Members
 
-from twisted.trial import unittest
-from buildbot.test.util import connector_component
 from buildbot.db import changes
 from buildbot.test.fake import fakedb
+from buildbot.test.util import connector_component
+from twisted.trial import unittest
+
 
 class TestBadRows(connector_component.ConnectorComponentMixin,
                   unittest.TestCase):
@@ -24,13 +25,15 @@ class TestBadRows(connector_component.ConnectorComponentMixin,
     # version between 0.8.3 and 0.8.4 get reasonable behavior even though some
     # rows in the change_properties database do not contain a proper [value,
     # source] tuple.
+
     def setUp(self):
         d = self.setUpConnectorComponent(
-            table_names=['changes', 'change_properties',
-                         'change_links', 'change_files'])
+            table_names=['patches', 'sourcestamps', 'changes',
+                         'change_properties', 'change_files'])
+
+        @d.addCallback
         def finish_setup(_):
             self.db.changes = changes.ChangesConnectorComponent(self.db)
-        d.addCallback(finish_setup)
         return d
 
     def tearDown(self):
@@ -38,31 +41,36 @@ class TestBadRows(connector_component.ConnectorComponentMixin,
 
     def test_bogus_row_no_source(self):
         d = self.insertTestData([
+            fakedb.SourceStamp(id=10),
             fakedb.ChangeProperty(changeid=13, property_name='devel',
-                property_value='"no source"'),
-            fakedb.Change(changeid=13),
+                                  property_value='"no source"'),
+            fakedb.Change(changeid=13, sourcestampid=10),
         ])
+
+        @d.addCallback
         def get13(_):
             return self.db.changes.getChange(13)
-        d.addCallback(get13)
+
+        @d.addCallback
         def check13(c):
             self.assertEqual(c['properties'],
                              dict(devel=('no source', 'Change')))
-        d.addCallback(check13)
         return d
 
     def test_bogus_row_jsoned_list(self):
         d = self.insertTestData([
+            fakedb.SourceStamp(id=10),
             fakedb.ChangeProperty(changeid=13, property_name='devel',
-                property_value='[1, 2]'),
-            fakedb.Change(changeid=13),
+                                  property_value='[1, 2]'),
+            fakedb.Change(changeid=13, sourcestampid=10),
         ])
+
+        @d.addCallback
         def get13(_):
             return self.db.changes.getChange(13)
-        d.addCallback(get13)
+
+        @d.addCallback
         def check13(c):
             self.assertEqual(c['properties'],
-                             dict(devel=([1,2], 'Change')))
-        d.addCallback(check13)
+                             dict(devel=([1, 2], 'Change')))
         return d
-

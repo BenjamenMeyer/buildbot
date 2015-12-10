@@ -14,30 +14,52 @@
 # Copyright Buildbot Team Members
 
 import mock
+
+from buildbot.changes import manager
+from buildbot.test.fake import fakemaster
+from buildbot.util import service
 from twisted.trial import unittest
-from buildbot.changes import manager, base
+
+
+class FakeChangeSource(service.ClusteredBuildbotService):
+    pass
+
 
 class TestChangeManager(unittest.TestCase):
+
     def setUp(self):
+        self.master = fakemaster.make_master()
         self.cm = manager.ChangeManager()
-        self.cm.parent = mock.Mock()
-        self.cm.startService()
+        self.cm.setServiceParent(self.master)
+        self.new_config = mock.Mock()
 
-    def tearDown(self):
-        return self.cm.stopService()
+    def make_sources(self, n):
+        for i in range(n):
+            src = FakeChangeSource(name='ChangeSource %d' % i)
+            yield src
 
-    def test_addSource_removeSource(self):
-        class MySource(base.ChangeSource):
-            pass
+    def test_reconfigService_add(self):
+        src1, src2 = self.make_sources(2)
+        src1.setServiceParent(self.cm)
+        self.new_config.change_sources = [src1, src2]
 
-        src = MySource()
-        self.cm.addSource(src)
+        d = self.cm.reconfigServiceWithBuildbotConfig(self.new_config)
 
-        # addSource should set the source's 'master'
-        assert src.master is self.cm.parent
-
-        d = self.cm.removeSource(src)
+        @d.addCallback
         def check(_):
-            # and removeSource should rmeove it.
-            assert src.master is None
+            self.assertIdentical(src2.parent, self.cm)
+            self.assertIdentical(src2.master, self.master)
+        return d
+
+    def test_reconfigService_remove(self):
+        src1, = self.make_sources(1)
+        src1.setServiceParent(self.cm)
+        self.new_config.change_sources = []
+
+        d = self.cm.reconfigServiceWithBuildbotConfig(self.new_config)
+
+        @d.addCallback
+        def check(_):
+            self.assertIdentical(src1.parent, None)
+            self.assertIdentical(src1.master, None)
         return d

@@ -12,38 +12,131 @@
 # Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
 # Copyright Buildbot Team Members
+from future.utils import iteritems
+from future.utils import itervalues
 
 import calendar
-from zope.interface import implements
-from twisted.python import log
-from twisted.internet import defer
-from buildbot import interfaces, sourcestamp
+
+from buildbot.data import resultspec
 from buildbot.process import properties
-from buildbot.status.results import FAILURE
-from buildbot.db import buildrequests
+from buildbot.process.results import SKIPPED
+from twisted.internet import defer
+
+
+class BuildRequestCollapser(object):
+    # brids is a list of the new added buildrequests id
+    # This class is called before generated the 'new' event for the buildrequest
+
+    # Before adding new buildset/buildrequests, we must examine each unclaimed
+    # buildrequest.
+    # EG:
+    #  1. get the list of all unclaimed buildrequests:
+    #     - We must exclude all buildsets which have at least 1 claimed buildrequest
+    #  2. For each unclaimed buildrequests, if compatible with the new request
+    #     (sourcestamps match, except for revision) Then:
+    #     2.1. claim it
+    #     2.2. complete it with result SKIPPED
+
+    def __init__(self, master, brids):
+        self.master = master
+        self.brids = brids
+
+    @defer.inlineCallbacks
+    def _getUnclaimedBrs(self, builderid):
+        # Retrieve the list of Brs for all unclaimed builds
+        unclaim_brs = yield self.master.data.get(('builders',
+                                                  builderid,
+                                                  'buildrequests'),
+                                                 [resultspec.Filter('claimed',
+                                                                    'eq',
+                                                                    [False])])
+        # sort by submitted_at, so the first is the oldest
+        unclaim_brs.sort(key=lambda brd: brd['submitted_at'])
+        defer.returnValue(unclaim_brs)
+
+    @defer.inlineCallbacks
+    def collapse(self):
+        collapseBRs = []
+
+        for brid in self.brids:
+            # Get the BuildRequest object
+            br = yield self.master.data.get(('buildrequests', brid))
+            # Retreive the buildername
+            builderid = br['builderid']
+            bldrdict = yield self.master.data.get(('builders', builderid))
+            # Get the builder object
+            bldr = self.master.botmaster.builders.get(bldrdict['name'])
+            # Get the Collapse BuildRequest function (from the configuration)
+            collapseRequestsFn = bldr.getCollapseRequestsFn() if bldr else None
+            unclaim_brs = yield self._getUnclaimedBrs(builderid)
+
+            # short circuit if there is no merging to do
+            if not collapseRequestsFn or not unclaim_brs:
+                continue
+
+            for unclaim_br in unclaim_brs:
+                if unclaim_br['buildrequestid'] == br['buildrequestid']:
+                    continue
+
+                canCollapse = yield collapseRequestsFn(bldr, br, unclaim_br)
+                if canCollapse is True:
+                    collapseBRs.append(unclaim_br)
+
+        brids = [b['buildrequestid'] for b in collapseBRs]
+        if collapseBRs:
+            # Claim the buildrequests
+            yield self.master.data.updates.claimBuildRequests(brids)
+            # complete the buildrequest with result SKIPPED.
+            yield self.master.data.updates.completeBuildRequests(brids,
+                                                                 SKIPPED)
+
+        defer.returnValue(brids)
+
+
+class TempSourceStamp(object):
+    # temporary fake sourcestamp; attributes are added below
+
+    def asDict(self):
+        # This return value should match the kwargs to SourceStampsConnectorComponent.findSourceStampId
+        result = vars(self).copy()
+
+        del result['ssid']
+        del result['changes']
+
+        if 'patch' in result and result['patch'] is None:
+            result['patch'] = (None, None, None)
+        result['patch_level'], result['patch_body'], result['patch_subdir'] = result.pop('patch')
+        result['patch_author'], result['patch_comment'] = result.pop('patch_info')
+
+        assert all(
+            isinstance(val, (unicode, type(None), int))
+            for attr, val in iteritems(result)
+        ), result
+        return result
+
+
+class TempChange(object):
+    # temporary fake change
+
+    def __init__(self, d):
+        for k, v in iteritems(d):
+            setattr(self, k, v)
+        self.properties = properties.Properties()
+        for k, v in iteritems(d['properties']):
+            self.properties.setProperty(k, v[0], v[1])
+        self.who = d['author']
+
 
 class BuildRequest(object):
+
     """
 
     A rolled-up encapsulation of all of the data relevant to a build request.
 
-    This class is used by the C{nextBuild} and C{mergeRequests} configuration
+    This class is used by the C{nextBuild} and C{collapseRequests} configuration
     parameters, as well as in starting a build.  Construction of a BuildRequest
     object is a heavyweight process involving a lot of database queries, so
     it should be avoided where possible.  See bug #1894.
-
-    Build requests have a SourceStamp which specifies what sources to build.
-    This may specify a specific revision of the source tree (so source.branch,
-    source.revision, and source.patch are used). The .patch attribute is either
-    None or a tuple of (patchlevel, diff), consisting of a number to use in
-    'patch -pN', and a unified-format context diff.
-
-    Alternatively, the SourceStamp may specify a set of Changes to be built,
-    contained in source.changes. In this case, the requeset may be mergeable
-    with other BuildRequests on the same branch.
-
-    @type source: L{buildbot.sourcestamp.SourceStamp}
-    @ivar source: the source stamp that this BuildRequest use
 
     @type reason: string
     @ivar reason: the reason this Build is being requested. Schedulers provide
@@ -68,8 +161,8 @@ class BuildRequest(object):
     @ivar bsid: ID of the parent buildset
     """
 
-    source = None
     submittedAt = None
+    sources = {}
 
     @classmethod
     def fromBrdict(cls, master, brdict):
@@ -87,59 +180,132 @@ class BuildRequest(object):
         @returns: L{BuildRequest}, via Deferred
         """
         cache = master.caches.get_cache("BuildRequests", cls._make_br)
-        return cache.get(brdict['brid'], brdict=brdict, master=master)
+        return cache.get(brdict['buildrequestid'], brdict=brdict, master=master)
 
     @classmethod
-    @defer.deferredGenerator
+    @defer.inlineCallbacks
     def _make_br(cls, brid, brdict, master):
         buildrequest = cls()
         buildrequest.id = brid
         buildrequest.bsid = brdict['buildsetid']
-        buildrequest.buildername = brdict['buildername']
+        builder = yield master.db.builders.getBuilder(brdict['builderid'])
+        buildrequest.buildername = builder['name']
+        buildrequest.builderid = brdict['builderid']
         buildrequest.priority = brdict['priority']
         dt = brdict['submitted_at']
         buildrequest.submittedAt = dt and calendar.timegm(dt.utctimetuple())
         buildrequest.master = master
+        buildrequest.waitedFor = brdict['waited_for']
 
         # fetch the buildset to get the reason
-        wfd = defer.waitForDeferred(
-            master.db.buildsets.getBuildset(brdict['buildsetid']))
-        yield wfd
-        buildset = wfd.getResult()
-        assert buildset # schema should guarantee this
+        buildset = yield master.db.buildsets.getBuildset(brdict['buildsetid'])
+        assert buildset  # schema should guarantee this
         buildrequest.reason = buildset['reason']
 
         # fetch the buildset properties, and convert to Properties
-        wfd = defer.waitForDeferred(
-            master.db.buildsets.getBuildsetProperties(brdict['buildsetid']))
-        yield wfd
-        buildset_properties = wfd.getResult()
+        buildset_properties = yield master.db.buildsets.getBuildsetProperties(brdict['buildsetid'])
 
-        pr = properties.Properties()
-        for name, (value, source) in buildset_properties.iteritems():
-            pr.setProperty(name, value, source)
-        buildrequest.properties = pr
+        buildrequest.properties = properties.Properties.fromDict(buildset_properties)
 
-        # fetch the sourcestamp dictionary
-        wfd = defer.waitForDeferred(
-            master.db.sourcestamps.getSourceStamp(buildset['sourcestampid']))
-        yield wfd
-        ssdict = wfd.getResult()
-        assert ssdict # db schema should enforce this anyway
+        # make a fake sources dict (temporary)
+        bsdata = yield master.data.get(('buildsets', str(buildrequest.bsid)))
+        assert bsdata['sourcestamps'], "buildset must have at least one sourcestamp"
+        buildrequest.sources = {}
+        for ssdata in bsdata['sourcestamps']:
+            ss = buildrequest.sources[ssdata['codebase']] = TempSourceStamp()
+            ss.ssid = ssdata['ssid']
+            ss.branch = ssdata['branch']
+            ss.revision = ssdata['revision']
+            ss.repository = ssdata['repository']
+            ss.project = ssdata['project']
+            ss.codebase = ssdata['codebase']
+            if ssdata['patch']:
+                patch = ssdata['patch']
+                ss.patch = (patch['level'], patch['body'], patch['subdir'])
+                ss.patch_info = (patch['author'], patch['comment'])
+            else:
+                ss.patch = None
+                ss.patch_info = (None, None)
+            changes = yield master.data.get(("sourcestamps", ss.ssid, "changes"))
+            ss.changes = [TempChange(change) for change in changes]
 
-        # and turn it into a SourceStamp
-        wfd = defer.waitForDeferred(
-            sourcestamp.SourceStamp.fromSsdict(master, ssdict))
-        yield wfd
-        buildrequest.source = wfd.getResult()
+        defer.returnValue(buildrequest)
 
-        yield buildrequest # return value
+    @staticmethod
+    @defer.inlineCallbacks
+    def canBeCollapsed(master, br1, br2):
+        """
+        Returns true if both buildrequest can be merged, via Deferred.
 
-    def canBeMergedWith(self, other):
-        return self.source.canBeMergedWith(other.source)
+        This implements Buildbot's default collapse strategy.
+        """
+        # short-circuit: if these are for the same buildset, collapse away
+        if br1['buildsetid'] == br2['buildsetid']:
+            defer.returnValue(True)
+            return
 
-    def mergeWith(self, others):
-        return self.source.mergeWith([o.source for o in others])
+        # get the buidlsets for each buildrequest
+        selfBuildsets = yield master.data.get(
+            ('buildsets', str(br1['buildsetid'])))
+        otherBuildsets = yield master.data.get(
+            ('buildsets', str(br2['buildsetid'])))
+
+        # extract sourcestamps, as dictionaries by codebase
+        selfSources = dict((ss['codebase'], ss)
+                           for ss in selfBuildsets['sourcestamps'])
+        otherSources = dict((ss['codebase'], ss)
+                            for ss in otherBuildsets['sourcestamps'])
+
+        # if the sets of codebases do not match, we can't collapse
+        if set(selfSources) != set(otherSources):
+            defer.returnValue(False)
+            return
+
+        for c, selfSS in iteritems(selfSources):
+            otherSS = otherSources[c]
+            if selfSS['revision'] != otherSS['revision']:
+                defer.returnValue(False)
+                return
+            if selfSS['repository'] != otherSS['repository']:
+                defer.returnValue(False)
+                return
+            if selfSS['branch'] != otherSS['branch']:
+                defer.returnValue(False)
+                return
+            if selfSS['project'] != otherSS['project']:
+                defer.returnValue(False)
+                return
+            # anything with a patch won't be collapsed
+            if selfSS['patch'] or otherSS['patch']:
+                defer.returnValue(False)
+                return
+
+        defer.returnValue(True)
+
+    def mergeSourceStampsWith(self, others):
+        """ Returns one merged sourcestamp for every codebase """
+        # get all codebases from all requests
+        all_codebases = set(self.sources)
+        for other in others:
+            all_codebases |= set(other.sources)
+
+        all_merged_sources = {}
+        # walk along the codebases
+        for codebase in all_codebases:
+            all_sources = []
+            if codebase in self.sources:
+                all_sources.append(self.sources[codebase])
+            for other in others:
+                if codebase in other.sources:
+                    all_sources.append(other.sources[codebase])
+            assert len(all_sources) > 0, "each codebase should have atleast one sourcestamp"
+
+            # TODO: select the sourcestamp that best represents the merge,
+            # preferably the latest one.  This used to be accomplished by
+            # looking at changeids and picking the highest-numbered.
+            all_merged_sources[codebase] = all_sources[-1]
+
+        return list(itervalues(all_merged_sources))
 
     def mergeReasons(self, others):
         """Return a reason for the merged build request."""
@@ -151,49 +317,3 @@ class BuildRequest(object):
 
     def getSubmitTime(self):
         return self.submittedAt
-
-    @defer.deferredGenerator
-    def cancelBuildRequest(self):
-        # first, try to claim the request; if this fails, then it's too late to
-        # cancel the build anyway
-        try:
-            wfd = defer.waitForDeferred(
-                self.master.db.buildrequests.claimBuildRequests([self.id]))
-            yield wfd
-            wfd.getResult()
-        except buildrequests.AlreadyClaimedError:
-            log.msg("build request already claimed; cannot cancel")
-            return
-
-        # then complete it with 'FAILURE'; this is the closest we can get to
-        # cancelling a request without running into trouble with dangling
-        # references.
-        wfd = defer.waitForDeferred(
-            self.master.db.buildrequests.completeBuildRequests([self.id],
-                                                                FAILURE))
-        yield wfd
-        wfd.getResult()
-
-        # and let the master know that the enclosing buildset may be complete
-        wfd = defer.waitForDeferred(
-                self.master.maybeBuildsetComplete(self.bsid))
-        yield wfd
-        wfd.getResult()
-
-class BuildRequestControl:
-    implements(interfaces.IBuildRequestControl)
-
-    def __init__(self, builder, request):
-        self.original_builder = builder
-        self.original_request = request
-        self.brid = request.id
-
-    def subscribe(self, observer):
-        raise NotImplementedError
-
-    def unsubscribe(self, observer):
-        raise NotImplementedError
-
-    def cancel(self):
-        d = self.original_request.cancelBuildRequest()
-        d.addErrback(log.err, 'while cancelling build request')

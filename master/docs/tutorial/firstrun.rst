@@ -7,140 +7,178 @@ First Run
 Goal
 ----
 
-This tutorial will take you from zero to running your first buildbot master
-and slave as quickly as possible, without changing the default configuration.
+This tutorial will take you from zero to running your first buildbot master and slave as quickly as possible, without changing the default configuration.
 
-This tutorial is all about instant gratification and the five minute
-experience: in five minutes we want to convince you that this project Works,
-and that you should seriously consider spending some more time learning
-the system.  In this tutorial no configuration or code changes are done.
+This tutorial is all about instant gratification and the five minute experience: in five minutes we want to convince you that this project Works, and that you should seriously consider spending some more time learning the system.
+In this tutorial no configuration or code changes are done.
 
-This tutorial assumes that you are running on Unix, but might be adaptable
-easily to Windows.
+This tutorial assumes that you are running on Unix, but might be adaptable easily to Windows.
 
-*For the quickest way through, you should be able to cut and paste each shell
-block from this tutorial directly into a terminal.*
+Thanks to virtualenv_, installing buildbot in a standalone environment is very easy.
+For those more familiar with Docker_, there also exists a :ref:`docker version of these instructions <first-run-docker-label>`.
 
-Getting the code
-----------------
+You should be able to cut and paste each shell block from this tutorial directly into a terminal.
+
+.. _Docker: https://docker.com
+
+.. _getting-code-label:
+
+Getting ready
+-------------
 
 There are many ways to get the code on your machine.
-For this tutorial, we will use easy_install to install and run buildbot.
-While this isn't the preferred method to install buildbot, it is the simplest
-one to use for the purposes of this tutorial because it should work on all
-systems.  (The preferred method would be to install buildbot from packages
-of your distribution.)
+We will use here the easiest one: via ``pip`` in a virtualenv_.
+It has the advantage of not polluting your operating system, as everything will be contained in the virtualenv.
 
 To make this work, you will need the following installed:
- * python_ and the development packages for it
- * virtualenv_
- * git_
 
-.. _python: http://www.python.org/
-.. _virtualenv: http://pypi.python.org/pypi/virtualenv/
-.. _git: http://git-scm.com/
+* Python_ and the development packages for it
+* virtualenv_
 
-Preferably, use your package installer to install these.
+.. _Python: https://www.python.org/
+.. _virtualenv: https://pypi.python.org/pypi/virtualenv
 
-You will also need a working Internet connection, as virtualenv and
-easy_install will need to download other projects from the Internet.
+Preferably, use your distribution package manager to install these.
 
-Let's dive in by typing at the terminal::
+You will also need a working Internet connection, as virtualenv and pip will need to download other projects from the Internet.
 
-  cd
-  mkdir -p tmp/buildbot
-  cd tmp/buildbot
-  virtualenv --no-site-packages sandbox
-  source sandbox/bin/activate
-  easy_install buildbot
+.. note::
+
+    Buildbot does not require root access.
+    Run the commands in this tutorial as a normal, unprivileged user.
 
 Creating a master
 -----------------
 
-At the terminal, type::
+The first necessary step is to create a virtualenv for our master.
+All our operations will happen in this directory:
 
-  cd sandbox
-  buildbot create-master master
+.. code-block:: bash
+
+  cd
+  mkdir tmp
+  cd tmp
+  virtualenv --no-site-packages bb-master
+  cd bb-master
+
+Now that we are ready, we need to install buildbot:
+
+.. code-block:: bash
+
+  ./bin/pip install buildbot
+
+Now that buildbot is installed, it's time to create the master:
+
+.. code-block:: bash
+
+  ./bin/buildbot create-master master
+ 
+Buildbot's activity is controlled by a configuration file.
+We will use the sample configuration file unchanged:
+
+.. code-block:: bash
+ 
   mv master/master.cfg.sample master/master.cfg
 
-Now start it::
+Finally, start the master:
 
-  buildbot start $VIRTUAL_ENV/master
-  tail -f $VIRTUAL_ENV/master/twistd.log
+.. code-block:: bash
 
-You will now see all of the log information from the master in this terminal.
-You should see lines like this::
+  ./bin/buildbot start master
 
-  2009-07-29 21:01:46+0200 [-] twisted.spread.pb.PBServerFactory starting on 9989
-  2009-07-29 21:01:46+0200 [-] Starting factory <twisted.spread.pb.PBServerFactory instance at 0x1fc8ab8>
-  2009-07-29 21:01:46+0200 [-] BuildMaster listening on port tcp:9989
-  2009-07-29 21:01:46+0200 [-] configuration update started
-  2009-07-29 21:01:46+0200 [-] configuration update complete
+You will now see some log information from the master in this terminal.
+It should ends with lines like these:
+
+.. code-block:: none
+
+    2014-11-01 15:52:55+0100 [-] BuildMaster is running
+    The buildmaster appears to have (re)started correctly.
+
+From now on, feel free to visit the web status page running on the port 8010: http://localhost:8010/
+
+Our master now needs (at least) a slave to execute its commands.
+For that, heads on to the next section !
 
 Creating a slave
 ----------------
 
-Open a new terminal, and first enter the same sandbox you created before::
+The buildslave will be executing the commands sent by the master.
+In this tutorial, we are using the pyflakes project as an example.
+As a consequence of this, your slave will need access to the git_ command in order to checkout some code.
+Be sure that it is installed, or the builds will fail.
+
+Same as we did for our master, we will create a virtualenv for our slave next to the other one.
+It would however be completely ok to do this on another computer - as long as the *slave* computer is able to connect to the *master* one:
+
+.. code-block:: bash
 
   cd
-  cd tmp/buildbot
-  source sandbox/bin/activate
+  cd tmp
+  virtualenv --no-site-packages bb-slave
+  cd bb-slave
 
-Install buildslave command::
- 
-   easy_install buildbot-slave
+Install the ``buildslave`` command:
 
-Now, create the slave::
+.. code-block:: bash
 
-  cd sandbox
-  buildslave create-slave slave localhost:9989 example-slave pass
+   ./bin/pip install buildbot-slave
 
-The user:host pair, username, and password should be the same as the ones in
-master.cfg; please verify this is the case by looking at the section for c['slaves']::
+Now, create the slave:
 
-  cat $VIRTUAL_ENV/master/master.cfg
+.. code-block:: bash
 
-Now, start the slave::
+  ./bin/buildslave create-slave slave localhost example-slave pass
 
-  buildslave start $VIRTUAL_ENV/slave
-  
-Check the slave's log::
+.. note:: If you decided to create this from another computer, you should replace ``localhost`` with the name of the computer where your master is running.
 
-  tail -f $VIRTUAL_ENV/slave/twistd.log
+The username (``example-slave``), and password (``pass``) should be the same as those in :file:`master/master.cfg`; verify this is the case by looking at the section for ``c['slaves']``:
 
-You should see lines like the following at the end of the worker log::
+.. code-block:: bash
 
-  2009-07-29 20:59:18+0200 [Broker,client] message from master: attached
-  2009-07-29 20:59:18+0200 [Broker,client] SlaveBuilder.remote_print(buildbot-full): message from master: attached
-  2009-07-29 20:59:18+0200 [Broker,client] sending application-level keepalives every 600 seconds
+  cat master/master.cfg
 
-Meanwhile, in the master log, if you tail the log you should see lines like this::
+And finally, start the slave:
 
-  tail -f $VIRTUAL_ENV/master/twistd.log
+.. code-block:: bash
 
-  2011-03-13 18:46:58-0700 [Broker,1,127.0.0.1] slave 'example-slave' attaching from IPv4Address(TCP, '127.0.0.1', 41306)
-  2011-03-13 18:46:58-0700 [Broker,1,127.0.0.1] Got slaveinfo from 'example-slave'
-  2011-03-13 18:46:58-0700 [Broker,1,127.0.0.1] bot attached
-  2011-03-13 18:46:58-0700 [Broker,1,127.0.0.1] Buildslave example-slave attached to runtests
+  ./bin/buildslave start slave
 
-You should now be able to go to http://localhost:8010, where you will see
-a web page similar to:
+Check the slave's output.
+It should end with lines like these:
+
+.. code-block:: none
+
+  2014-11-01 15:56:51+0100 [-] Connecting to localhost:9989
+  2014-11-01 15:56:51+0100 [Broker,client] message from master: attached
+  The buildslave appears to have (re)started correctly.
+
+Meanwhile, from the other terminal, in the master log (:file:``twisted.log`` in the master directory), you should see lines like these:
+
+.. code-block:: none
+
+  2014-11-01 15:56:51+0100 [Broker,1,127.0.0.1] slave 'example-slave' attaching from IPv4Address(TCP, '127.0.0.1', 54015)
+  2014-11-01 15:56:51+0100 [Broker,1,127.0.0.1] Got slaveinfo from 'example-slave'
+  2014-11-01 15:56:51+0100 [-] bot attached
+
+You should now be able to go to http://localhost:8010, where you will see a web page similar to:
 
 .. image:: _images/index.png
    :alt: index page
 
-Click on the 
-`Waterfall Display link <http://localhost:8010/waterfall>`_
-and you get this:
+Click on the `Waterfall Display link <http://localhost:8010/waterfall>`_ and you get this:
 
 .. image:: _images/waterfall-empty.png
    :alt: empty waterfall.
 
-That's the end of the first tutorial.  A bit underwhelming, you say ? Well,
-that was the point! We just wanted to get you to dip your toes in the water.
-It's easy to take your first steps, but this is about as far as we can go
-without touching the configuration.
+Your master is now quietly waiting for new commits to Pyflakes.
+This doesn't happen very often though.
+In the next section, we'll see how to manually start a build.
 
-You've got a taste now, but you're probably curious for more.  Let's step it
-up a little in the second tutorial by changing the configuration and doing
-an actual build. Continue on to :ref:`quick-tour-label`
+We just wanted to get you to dip your toes in the water.
+It's easy to take your first steps, but this is about as far as we can go without touching the configuration.
+
+You've got a taste now, but you're probably curious for more.
+Let's step it up a little in the second tutorial by changing the configuration and doing an actual build.
+Continue on to :ref:`quick-tour-label`.
+
+.. _git: http://git-scm.com/

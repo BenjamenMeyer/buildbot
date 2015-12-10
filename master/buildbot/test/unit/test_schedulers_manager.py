@@ -14,29 +14,37 @@
 # Copyright Buildbot Team Members
 
 import mock
-from twisted.trial import unittest
+
+from buildbot.schedulers import base
+from buildbot.schedulers import manager
 from twisted.internet import defer
-from buildbot.schedulers import manager, base
+from twisted.trial import unittest
+
 
 class SchedulerManager(unittest.TestCase):
 
     def setUp(self):
-        self.next_schedulerid = 13
-        self.schedulerids = {}
+        self.next_objectid = 13
+        self.objectids = {}
 
         self.master = mock.Mock()
-        def getSchedulerId(sched_name, class_name):
+        self.master.master = self.master
+
+        def getObjectId(sched_name, class_name):
             k = (sched_name, class_name)
             try:
-                rv = self.schedulerids[k]
-            except:
-                rv = self.schedulerids[k] = self.next_schedulerid
-                self.next_schedulerid += 1
+                rv = self.objectids[k]
+            except KeyError:
+                rv = self.objectids[k] = self.next_objectid
+                self.next_objectid += 1
             return defer.succeed(rv)
-        self.master.db.schedulers.getSchedulerId = getSchedulerId
+        self.master.db.state.getObjectId = getObjectId
 
-        self.sm = manager.SchedulerManager(self.master)
-        self.sm.startService()
+        self.new_config = mock.Mock()
+
+        self.sm = manager.SchedulerManager()
+        self.sm.setServiceParent(self.master)
+        return self.sm.startService()
 
     def tearDown(self):
         if self.sm.running:
@@ -45,74 +53,96 @@ class SchedulerManager(unittest.TestCase):
     class Sched(base.BaseScheduler):
 
         # changing sch.attr should make a scheduler look "updated"
-        compare_attrs = base.BaseScheduler.compare_attrs + ( 'attr', )
+        compare_attrs = ('attr', )
         already_started = False
+        reconfig_count = 0
 
         def startService(self):
             assert not self.already_started
             assert self.master is not None
-            assert self.schedulerid is not None
+            assert self.objectid is not None
             self.already_started = True
-            base.BaseScheduler.startService(self)
+            return base.BaseScheduler.startService(self)
 
         def stopService(self):
             d = base.BaseScheduler.stopService(self)
+
             def still_set(_):
                 assert self.master is not None
-                assert self.schedulerid is not None
+                assert self.objectid is not None
             d.addCallback(still_set)
             return d
 
-        def assertNotSet(self):
-            assert not self.master
-            assert self.schedulerid is None
+    class ReconfigSched(Sched):
 
-    def makeSched(self, name, attr='alpha'):
-        sch = self.Sched(name=name, builderNames=['x'], properties={})
+        def reconfigServiceWithSibling(self, new_config):
+            self.reconfig_count += 1
+            self.attr = new_config.attr
+            return base.BaseScheduler.reconfigServiceWithSibling(self, new_config)
+
+    class ReconfigSched2(ReconfigSched):
+        pass
+
+    def makeSched(self, cls, name, attr='alpha'):
+        sch = cls(name=name, builderNames=['x'], properties={})
         sch.attr = attr
         return sch
 
     # tests
 
-    def test_updateSchedulers(self):
-        d = defer.succeed(None)
+    @defer.inlineCallbacks
+    def test_reconfigService_add_and_change_and_remove(self):
+        sch1 = self.makeSched(self.ReconfigSched, 'sch1', attr='alpha')
+        self.new_config.schedulers = dict(sch1=sch1)
 
-        # add a scheduler
-        fred1 = self.makeSched('fred', attr='alpha')
-        d.addCallback(lambda _ : self.sm.updateSchedulers([ fred1 ]))
-        def check1(_):
-            self.assertEqual(fred1.parent, self.sm)
-        d.addCallback(check1)
+        yield self.sm.reconfigServiceWithBuildbotConfig(self.new_config)
 
-        # update it with an identically-configured scheduler and a new one
-        fred2 = self.makeSched('fred', attr='alpha')
-        ginger1 = self.makeSched('ginger')
-        d.addCallback(lambda _ : self.sm.updateSchedulers([ fred2, ginger1 ]))
-        def check2(_):
-            # fred1 is still active, and fred2 is not.  Ginger is active
-            self.assertEqual(fred1.parent, self.sm)
-            self.assertEqual(fred2.parent, None)
-            self.assertEqual(ginger1.parent, self.sm)
-        d.addCallback(check2)
+        self.assertIdentical(sch1.parent, self.sm)
+        self.assertIdentical(sch1.master, self.master)
+        self.assertEqual(sch1.reconfig_count, 1)
 
-        # update it with an differently-configured fred; same ginger
-        fred3 = self.makeSched('fred', attr='beta')
-        ginger2 = self.makeSched('ginger')
-        d.addCallback(lambda _ : self.sm.updateSchedulers([ ginger2, fred3 ]))
-        def check3(_):
-            # fred1 is inactive and fred3 is active
-            self.assertEqual(fred1.parent, None)
-            self.assertEqual(fred3.parent, self.sm)
-            self.assertEqual(ginger1.parent, self.sm)
-            self.assertEqual(ginger2.parent, None)
-        d.addCallback(check3)
+        sch1_new = self.makeSched(self.ReconfigSched, 'sch1', attr='beta')
+        sch2 = self.makeSched(self.ReconfigSched, 'sch2', attr='alpha')
+        self.new_config.schedulers = dict(sch1=sch1_new, sch2=sch2)
 
-        # and finally, remove fred
-        d.addCallback(lambda _ : self.sm.updateSchedulers([ ginger2 ]))
-        def check4(_):
-            self.assertEqual(fred3.parent, None)
-            self.assertEqual(ginger1.parent, self.sm)
-            self.assertEqual(ginger2.parent, None)
-        d.addCallback(check4)
+        yield self.sm.reconfigServiceWithBuildbotConfig(self.new_config)
 
-        return d
+        # sch1 is still the active scheduler, and has been reconfig'd,
+        # and has the correct attribute
+        self.assertIdentical(sch1.parent, self.sm)
+        self.assertIdentical(sch1.master, self.master)
+        self.assertEqual(sch1.attr, 'beta')
+        self.assertEqual(sch1.reconfig_count, 2)
+        self.assertIdentical(sch1_new.parent, None)
+        self.assertIdentical(sch1_new.master, None)
+
+        self.assertIdentical(sch2.parent, self.sm)
+        self.assertIdentical(sch2.master, self.master)
+
+        self.new_config.schedulers = {}
+
+        yield self.sm.reconfigServiceWithBuildbotConfig(self.new_config)
+
+        self.assertIdentical(sch1.parent, None)
+        self.assertIdentical(sch1.master, None)
+
+    @defer.inlineCallbacks
+    def test_reconfigService_class_name_change(self):
+        sch1 = self.makeSched(self.ReconfigSched, 'sch1')
+        self.new_config.schedulers = dict(sch1=sch1)
+
+        yield self.sm.reconfigServiceWithBuildbotConfig(self.new_config)
+
+        self.assertIdentical(sch1.parent, self.sm)
+        self.assertIdentical(sch1.master, self.master)
+        self.assertEqual(sch1.reconfig_count, 1)
+
+        sch1_new = self.makeSched(self.ReconfigSched2, 'sch1')
+        self.new_config.schedulers = dict(sch1=sch1_new)
+
+        yield self.sm.reconfigServiceWithBuildbotConfig(self.new_config)
+
+        # sch1 had its class name change, so sch1_new is now the active
+        # instance
+        self.assertIdentical(sch1_new.parent, self.sm)
+        self.assertIdentical(sch1_new.master, self.master)

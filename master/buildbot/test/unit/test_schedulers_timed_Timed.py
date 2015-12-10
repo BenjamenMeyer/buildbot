@@ -13,14 +13,16 @@
 #
 # Copyright Buildbot Team Members
 
-from twisted.trial import unittest
-from twisted.internet import task, defer
 from buildbot.schedulers import timed
 from buildbot.test.util import scheduler
+from twisted.internet import defer
+from twisted.internet import task
+from twisted.trial import unittest
+
 
 class Timed(scheduler.SchedulerMixin, unittest.TestCase):
 
-    SCHEDULERID = 928754
+    OBJECTID = 928754
 
     def setUp(self):
         self.setUpScheduler()
@@ -29,15 +31,17 @@ class Timed(scheduler.SchedulerMixin, unittest.TestCase):
         self.tearDownScheduler()
 
     class Subclass(timed.Timed):
+
         def getNextBuildTime(self, lastActuation):
             self.got_lastActuation = lastActuation
             return defer.succeed((lastActuation or 1000) + 60)
+
         def startBuild(self):
             self.started_build = True
             return defer.succeed(None)
 
     def makeScheduler(self, firstBuildDuration=0, **kwargs):
-        sched = self.attachScheduler(self.Subclass(**kwargs), self.SCHEDULERID)
+        sched = self.attachScheduler(self.Subclass(**kwargs), self.OBJECTID)
         self.clock = sched._reactor = task.Clock()
         return sched
 
@@ -49,14 +53,14 @@ class Timed(scheduler.SchedulerMixin, unittest.TestCase):
     def test_getPendingBuildTimes(self):
         sched = self.makeScheduler(name='test', builderNames=['foo'])
 
-        sched.startService()
+        sched.activate()
 
         self.assertEqual(sched.got_lastActuation, None)
-        self.assertEqual(sched.getPendingBuildTimes(), [ 1060 ])
+        self.assertEqual(sched.getPendingBuildTimes(), [1060])
 
         self.clock.advance(1065)
         self.assertTrue(sched.started_build)
-        self.assertEqual(sched.getPendingBuildTimes(), [ 1120 ])
+        self.assertEqual(sched.getPendingBuildTimes(), [1120])
 
-        d = sched.stopService()
+        d = sched.deactivate()
         return d
